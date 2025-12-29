@@ -1,0 +1,55 @@
+use super::SimRun;
+use rand::Rng;
+use rand_distr::{Cauchy, Distribution};
+
+impl SimRun {
+    pub(super) fn maybe_radar(&mut self, t: f64) {
+        if t < self.next_radar {
+            return;
+        }
+        self.next_radar += 1.0 / self.cfg.radar_rate;
+        let radar_delay = 0.07;
+        let meas_time = t - radar_delay;
+        let alt_true = truth_alt_at(
+            &self.truth_times,
+            &self.truth_hist,
+            meas_time,
+            self.dyn_params.radius_earth,
+            &self.truth,
+        );
+        if alt_true >= self.cfg.radar_max_alt || self.rng.gen_range(0.0..1.0) <= self.cfg.dropout_rate {
+            return;
+        }
+        let alt_meas = alt_true
+            + if self.rng.gen_range(0.0..1.0) < self.cfg.outlier_rate {
+                Cauchy::new(0.0, 10.0).unwrap().sample(&mut self.rng)
+            } else {
+                1.0 * self.standard_normal.sample(&mut self.rng)
+            };
+        self.est.update_radar(crate::estimator::RadarMeas {
+            t: meas_time,
+            alt: alt_meas,
+            sigma: 1.0,
+        });
+    }
+}
+
+fn truth_alt_at(
+    times: &[f64],
+    hist: &[crate::types::State],
+    t_target: f64,
+    radius_earth: f64,
+    truth: &crate::types::State,
+) -> f64 {
+    let idx = times
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, &ti)| ti <= t_target)
+        .map(|(i, _)| i)
+        .unwrap_or(times.len().saturating_sub(1));
+    if idx < hist.len() {
+        return hist[idx].r.norm() - radius_earth;
+    }
+    truth.r.norm() - radius_earth
+}

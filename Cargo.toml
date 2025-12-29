@@ -1,0 +1,61 @@
+[package]
+name = "entry_blackout_estimation"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nalgebra = { version = "0.32", features = ["serde-serialize"] }
+serde = { version = "1", features = ["derive"] }
+rand = "0.8"
+approx = "0.5"
+serde_json = "1.0"
+csv = "1.3"
+rand_distr = "0.4"
+anyhow = "1.0"
+
+# Diagnostics / offline tooling (optional in `flight` builds)
+rayon = { version = "1.10", optional = true }
+plotters = { version = "0.3", default-features = false, features = ["svg_backend", "line_series", "histogram"], optional = true }
+
+[features]
+# Keep current behavior by default (sim + plots).
+default = ["diagnostics"]
+
+# Enables Monte Carlo sim and plotting.
+diagnostics = ["dep:rayon", "dep:plotters"]
+
+# Minimal build for on-board / embedded style usage: no sim/plot code.
+flight = []
+
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"
+required-features = ["diagnostics"]
+
+[[bin]]
+name = "harness"
+path = "src/bin/harness.rs"
+required-features = ["diagnostics"]
+
+[[bin]]
+name = "sweep"
+path = "src/bin/sweep.rs"
+required-features = ["diagnostics"]
+
+[[bin]]
+name = "microbench"
+path = "src/bin/microbench.rs"
+required-features = ["diagnostics"]
+
+[[bin]]
+name = "repro"
+path = "src/bin/repro.rs"
+required-features = ["diagnostics"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false
+incremental = false

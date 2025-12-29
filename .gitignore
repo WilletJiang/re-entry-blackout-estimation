@@ -1,0 +1,28 @@
+# Rust / Cargo
+/target/
+**/*.rs.bk
+
+# OS
+.DS_Store
+
+# Editors
+/.vscode/
+/.idea/
+
+# Project outputs
+/output/
+/mc_*.csv
+/mc_*.svg
+
+# LaTeX (report/)
+report/*.aux
+report/*.bbl
+report/*.blg
+report/*.fdb_latexmk
+report/*.fls
+report/*.log
+report/*.out
+report/*.synctex.gz
+report/*.toc
+report/*.xdv
+report/missfont.log

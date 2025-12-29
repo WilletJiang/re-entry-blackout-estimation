@@ -1,0 +1,301 @@
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{structure}[2025/12/28 v1.0 SpaceX/NASA Inspired Report Style]
+
+%----------------------------------------------------------------------------------------
+%	REQUIRED PACKAGES
+%----------------------------------------------------------------------------------------
+
+\RequirePackage[english]{babel} % English language
+\RequirePackage{geometry} % Page layout
+\RequirePackage{geometry} % Page layout
+\RequirePackage{graphicx} % Images
+\RequirePackage[table]{xcolor} % Colors (Table option enabled)
+\RequirePackage{fontspec} % Advanced fonts
+\RequirePackage{titlesec} % Section formatting
+\RequirePackage{fancyhdr} % Headers and footers
+\RequirePackage{hyperref} % Links
+\RequirePackage{booktabs} % Nice tables
+\RequirePackage{caption} % Custom captions
+\RequirePackage{enumitem} % Custom lists
+\RequirePackage{ulem} % Underlining
+\RequirePackage{amsmath} % Math
+\RequirePackage{unicode-math} % Unicode Math
+\RequirePackage{etoolbox} % For global environment hooks
+
+% Global Table Styling
+\AtBeginEnvironment{tabular}{%
+  \sffamily\small\renewcommand{\arraystretch}{1.3}%
+  \rowcolors{2}{techgrey}{white}%
+}
+
+%----------------------------------------------------------------------------------------
+%	COLORS
+%----------------------------------------------------------------------------------------
+
+% SpaceX-esque Palette: Stark Black, White, Cool Greys
+\definecolor{spaceblack}{HTML}{000000}
+\definecolor{spacewhite}{HTML}{FFFFFF}
+\definecolor{techgrey}{HTML}{F4F4F4}
+\definecolor{spacexblue}{HTML}{005288} % Official-ish Blue
+\definecolor{accentgrey}{HTML}{808080}
+
+%----------------------------------------------------------------------------------------
+%	FONTS
+%----------------------------------------------------------------------------------------
+
+%----------------------------------------------------------------------------------------
+%	FONTS - SMART COMPATIBILITY MODE
+%----------------------------------------------------------------------------------------
+
+% 1. Primary Font: Suisse Int'l (Sans Serif)
+% Logic: Personal Absolute Path -> System Installed -> Fallback (Helvetica/Arial)
+
+% Check for User's Local File (Owner's Privilege)
+\IfFontExistsTF{/Users/willet/Library/Fonts/suisseintl-regular.otf}{
+    \setmainfont{suisseintl-regular.otf}[
+        Path = /Users/willet/Library/Fonts/,
+        BoldFont = suisseint'lbold.otf,
+        ItalicFont = suisseintl-regularitalic.otf,
+        BoldItalicFont = suisseint'lbolditalic.otf
+    ]
+    \setsansfont{suisseintl-regular.otf}[
+        Path = /Users/willet/Library/Fonts/,
+        BoldFont = suisseint'lbold.otf,
+        ItalicFont = suisseintl-regularitalic.otf,
+        BoldItalicFont = suisseint'lbolditalic.otf
+    ]
+    \typeout{Structure.sty: Loaded Suisse Int'l from Local Path.}
+}{
+    % Check for System Installed Suisse (Family Name)
+    \IfFontExistsTF{Suisse Int'l}{
+        \setmainfont{Suisse Int'l}[
+            UprightFont = *-Regular,
+            BoldFont = *-Bold,
+            ItalicFont = *-Italic,
+            BoldItalicFont = *-BoldItalic
+        ]
+        \setsansfont{Suisse Int'l}[
+            UprightFont = *-Regular,
+            BoldFont = *-Bold,
+            ItalicFont = *-Italic,
+            BoldItalicFont = *-BoldItalic
+        ]
+        \typeout{Structure.sty: Loaded Suisse Int'l from System.}
+    }{
+        % Fallback: Helvetica or Arial
+        \IfFontExistsTF{Helvetica}{
+            \setmainfont{Helvetica}
+            \setsansfont{Helvetica}
+            \typeout{Structure.sty: Suisse not found. Falling back to Helvetica.}
+        }{
+             \IfFontExistsTF{Arial}{
+                \setmainfont{Arial}
+                \setsansfont{Arial}
+                \typeout{Structure.sty: Suisse not found. Falling back to Arial.}
+            }{
+                \renewcommand{\familydefault}{\sfdefault}
+            }
+        }
+    }
+}
+
+% 2. Monospaced Font: PragmataPro Liga
+% Logic: Personal Absolute Path -> System Installed -> Fallback (Fira Code/Mono)
+
+% Check for User's Local File (Owner's Privilege)
+\IfFontExistsTF{/Users/willet/Library/Fonts/PragmataPro_Mono_R_liga_0829.ttf}{
+    \setmonofont{PragmataPro_Mono_R_liga_0829.ttf}[
+        Path = /Users/willet/Library/Fonts/,
+        BoldFont = PragmataProMonoLiga-Bold 0.829.otf,
+        ItalicFont = PragmataProMonoLiga-Italic 0.829.otf,
+        BoldItalicFont = PragmataProMonoLiga-BoldItalic 0.829.otf,
+        Scale = MatchLowercase
+    ]
+    \typeout{Structure.sty: Loaded PragmataPro from Local Path.}
+}{
+    % Check for System Installed PragmataPro
+    \IfFontExistsTF{PragmataPro Mono Liga}{
+        \setmonofont{PragmataPro Mono Liga}[Scale=MatchLowercase]
+        \typeout{Structure.sty: Loaded PragmataPro from System.}
+    }{
+        % Fallback: Fira Mono (Matches Fira Math)
+        \IfFontExistsTF{FiraMono-Regular.otf}{
+            \setmonofont{FiraMono-Regular.otf}[
+                BoldFont = FiraMono-Bold.otf,
+                Scale = MatchLowercase
+            ]
+            \typeout{Structure.sty: PragmataPro not found. Falling back to Fira Mono.}
+        }{
+            \setmonofont{Latin Modern Mono}[Scale=MatchLowercase]
+        }
+    }
+}
+
+%----------------------------------------------------------------------------------------
+%	CODE LISTINGS
+%----------------------------------------------------------------------------------------
+
+\RequirePackage{listings}
+\lstset{
+    basicstyle=\ttfamily\footnotesize,
+    breaklines=true,
+    frame=tb,
+    captionpos=b,
+    numbers=left,
+    numberstyle=\tiny\color{spacegrey},
+    keywordstyle=\color{black}\bfseries,
+    commentstyle=\color{accentgrey}\itshape,
+    stringstyle=\color{black},
+    escapeinside={(*@}{@*)},
+}
+% (End of font logic)
+% (Font logic end)
+% (End of fallback logic)
+
+% Math Font - Fira Math is a good geometric sans match
+\IfFontExistsTF{FiraMath-Regular.otf}{
+    \setmathfont{FiraMath-Regular.otf}
+}{
+    \IfFontExistsTF{latinmodern-math.otf}{
+        \setmathfont{latinmodern-math.otf}
+    }{
+        % Fallback to standard math if all else fails, or try another standard one
+        \IfFontExistsTF{texgyretermes-math.otf}{
+            \setmathfont{texgyretermes-math.otf}
+        }{}
+    }
+}
+
+%----------------------------------------------------------------------------------------
+%	PAGE LAYOUT
+%----------------------------------------------------------------------------------------
+
+\geometry{
+	paper=letterpaper, % Paper size
+	top=2.5cm, % Top margin
+	bottom=2.5cm, % Bottom margin
+	left=2.5cm, % Left margin
+	right=2.5cm, % Right margin
+	headheight=14pt, % Header height
+	footskip=1.5cm, % Space from bottom content to footer
+	headsep=1.0cm, % Space from header to top content
+}
+
+%----------------------------------------------------------------------------------------
+%	HEADERS AND FOOTERS
+%----------------------------------------------------------------------------------------
+
+\pagestyle{fancy}
+\fancyhf{} % Clear default headers and footers
+
+% Header
+\fancyhead[L]{\bfseries\sffamily\small \MakeUppercase{\@title}}
+\fancyhead[R]{\bfseries\sffamily\small \thepage}
+
+% Footer
+\fancyfoot[L]{\sffamily\footnotesize CONFIDENTIAL // INTERNAL USE ONLY}
+\fancyfoot[R]{\sffamily\footnotesize \@date}
+
+\renewcommand{\headrulewidth}{1pt} % Thickness of the header rule
+\renewcommand{\footrulewidth}{0pt} % Thickness of the footer rule
+
+%----------------------------------------------------------------------------------------
+%	SECTIONING
+%----------------------------------------------------------------------------------------
+
+% Section styling
+\titleformat{\section}
+  {\Large\bfseries\sffamily} % Format
+  {\thesection} % Label
+  {1em} % Sep
+  {\MakeUppercase} % Before code - takes title as argument
+  [{\color{black}\titlerule[2pt]}] % After code - heavy underline
+
+% Subsection styling
+\titleformat{\subsection}
+  {\large\bfseries\sffamily}
+  {\thesubsection}
+  {1em}
+  {}
+
+% Subsubsection styling
+\titleformat{\subsubsection}
+  {\normalsize\bfseries\sffamily}
+  {\thesubsubsection}
+  {1em}
+  {}
+
+%----------------------------------------------------------------------------------------
+%	TITLE PAGE
+%----------------------------------------------------------------------------------------
+
+\renewcommand{\maketitle}{
+    \begin{titlepage}
+        \pagestyle{empty}
+        \linespread{1.2}
+        \vspace*{3cm}
+
+        \noindent
+        {\Huge\bfseries\sffamily\MakeUppercase{\@title} \par}
+
+        \vspace{0.5cm}
+        \noindent
+        {\Large\sffamily \@author \par}
+
+        \vspace{2cm}
+
+        \noindent
+        \begin{tabular}{@{} l l @{}}
+            \textbf{DOC NO:} & TR-\the\year-001 \\
+            \textbf{DATE:} & \@date \\
+            \textbf{REV:} & A \\
+            \textbf{STATUS:} & DRAFT \\
+        \end{tabular}
+
+        \vfill
+
+        \noindent
+        {\large\bfseries\sffamily ABSTRACT}
+
+        \vspace{0.5cm}
+        \noindent
+        {\sffamily \@abstract}
+
+        \vfill
+
+        \noindent
+        \rule{\textwidth}{2pt}
+        \vspace{0.5cm}
+        \noindent
+        {\footnotesize\sffamily \textbf{PROPRIETARY INFORMATION}: The information contained in this document is proprietary to the organization and shall not be disclosed to any third party without prior written consent.}
+
+    \end{titlepage}
+}
+
+% Abstract command to store abstract text
+\newcommand{\@abstract}{}
+\renewcommand{\abstract}[1]{\renewcommand{\@abstract}{#1}}
+
+%----------------------------------------------------------------------------------------
+%	OTHER AESTHETICS
+%----------------------------------------------------------------------------------------
+
+% Caption styling
+\captionsetup{
+    font={sf,footnotesize},
+    labelfont={bf},
+    labelsep=colon,
+    singlelinecheck=false
+}
+
+% Hyperlink colors - black for simplicity/printability
+\hypersetup{
+    colorlinks=true,
+    linkcolor=black,
+    citecolor=black,
+    filecolor=black,
+    urlcolor=black
+}
+
+\setlength{\parskip}{0.5em}
+\setlength{\parindent}{0pt}

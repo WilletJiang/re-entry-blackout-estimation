@@ -11,7 +11,7 @@ use super::{
 };
 use crate::data::{AeroTable, RcsTorqueSeries};
 use crate::estimator::Estimator;
-use crate::physics::aero_force_torque;
+use crate::physics::nominal_body_dynamics_with_residual;
 use crate::types::{DynamicsParams, NoiseParams, State};
 use nalgebra::{Matrix3, Vector3};
 use rand::rngs::StdRng;
@@ -317,16 +317,20 @@ impl SimRun {
         self.maybe_apply_bias_jump(t);
         self.update_truth_residuals(t);
         let (tau_b, f_b) = self.rcs.sample(t);
-        let aero_rt = aero_force_torque(
+        let nominal_truth = nominal_body_dynamics_with_residual(
             &self.aero,
             &self.dyn_params,
             self.truth.r,
             self.truth.v,
             &self.truth.q,
             self.truth.omega,
+            f_b,
+            tau_b,
+            self.truth.aero_res_force,
+            self.truth.aero_res_torque,
         );
-        self.propagate_estimator(t, tau_b, f_b, &aero_rt);
-        self.propagate_truth(tau_b, f_b, &aero_rt);
+        self.propagate_estimator(t, tau_b, f_b, &nominal_truth);
+        self.propagate_truth(&nominal_truth);
         self.record_truth(t + self.cfg.dt);
         self.maybe_apply_bias_calibration(t + self.cfg.dt);
         self.maybe_gnss(t);

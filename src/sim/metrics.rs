@@ -76,4 +76,3 @@ pub(super) fn find_truth_q_at(
         .map(|(i, _)| i)?;
     Some(hist[idx].q)
 }
-

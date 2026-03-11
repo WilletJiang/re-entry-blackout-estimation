@@ -13,8 +13,8 @@ impl SimRun {
 
         let t_meas = t + self.cfg.dt;
         let in_blackout = (t_meas >= self.cfg.blackout_start) && (t_meas <= self.cfg.blackout_end);
-        let allow_gnss =
-            self.star_update_count >= self.cfg.star_convergence_count || t_meas >= self.cfg.blackout_start;
+        let allow_gnss = self.star_update_count >= self.cfg.star_convergence_count
+            || t_meas >= self.cfg.blackout_start;
 
         let mut gnss_updated = false;
         let mut sat_count_meas = 0usize;
@@ -40,7 +40,8 @@ impl SimRun {
             .last_gnss_accepted
             .is_some_and(|(t_acc, ok)| ok && (t_acc - t_meas).abs() < 1e-6);
 
-        if gnss_updated && t_meas >= self.cfg.blackout_end && t_meas <= self.cfg.blackout_end + 2.0 {
+        if gnss_updated && t_meas >= self.cfg.blackout_end && t_meas <= self.cfg.blackout_end + 2.0
+        {
             self.post_gnss_updates += 1;
             if gnss_accepted {
                 self.post_gnss_accepted += 1;
@@ -80,7 +81,11 @@ impl SimRun {
             n.sample(&mut self.rng),
             n.sample(&mut self.rng),
         );
-        let vel_sigma = if self.cfg.use_tight_coupling { 0.02 } else { 0.125 };
+        let vel_sigma = if self.cfg.use_tight_coupling {
+            0.02
+        } else {
+            0.125
+        };
         let nv = Normal::new(0.0, vel_sigma).unwrap();
         vel_meas += Vector3::new(
             nv.sample(&mut self.rng),
@@ -181,7 +186,10 @@ impl SimRun {
         };
 
         let sat_count = sat_meas.len();
-        self.est.update_gps_raw(GpsRawMeas { t: t_meas, sats: sat_meas });
+        self.est.update_gps_raw(GpsRawMeas {
+            t: t_meas,
+            sats: sat_meas,
+        });
         (true, sat_count, sat_sig_v_ls)
     }
 
@@ -399,4 +407,3 @@ impl SimRun {
         });
     }
 }
-

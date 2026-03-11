@@ -55,7 +55,6 @@ impl TraceRecorder {
             nees_rv: self.nees_rv,
         }
     }
-
 }
 
 fn time_to_step(dt: f64, t: f64) -> usize {

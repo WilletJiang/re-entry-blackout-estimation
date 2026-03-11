@@ -1,4 +1,4 @@
-use super::{history::Event, Estimator, MeasMat, RadarMeas};
+use super::{history::Event, robust::ROBUST_SENSOR_RADAR, Estimator, MeasMat, RadarMeas};
 use nalgebra::{SMatrix, SVector};
 
 impl Estimator {
@@ -23,15 +23,15 @@ impl Estimator {
             }
         }
         let r_cov = SMatrix::<f64, 1, 1>::new(meas.sigma * meas.sigma);
-        self.measurement_update(z, h, r_cov, 1);
+        let accepted = self.measurement_update(ROBUST_SENSOR_RADAR, z, h, r_cov, 1);
+        if !accepted {
+            self.replay_tail(replay_events);
+            return;
+        }
         self.maybe_checkpoint(true);
         if record {
             self.history.push_event(Event::Radar(meas));
         }
-        if let Some(ev) = replay_events {
-            for e in ev {
-                self.replay_event(e);
-            }
-        }
+        self.replay_tail(replay_events);
     }
 }

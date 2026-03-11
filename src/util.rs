@@ -1,5 +1,5 @@
-use nalgebra::{linalg::Cholesky, Matrix3, SMatrix, SymmetricEigen, Vector3};
 use crate::types::STATE_DIM;
+use nalgebra::{linalg::Cholesky, Matrix3, SMatrix, SymmetricEigen, Vector3};
 
 pub fn bracket(grid: &[f64], x: f64) -> (usize, usize) {
     debug_assert!(!grid.is_empty());

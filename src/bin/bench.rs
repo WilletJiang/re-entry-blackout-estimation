@@ -11,14 +11,7 @@ fn main() -> anyhow::Result<()> {
     let rcs = RcsTorqueSeries::load("data/RCS Torque Series 100Hz Preview.csv")?;
     let noise = NoiseParams::tuned();
     let cfg = SimConfig::default();
-    let results = run_monte_carlo(
-        100,
-        DynamicsParams::default(),
-        noise,
-        aero,
-        rcs,
-        cfg,
-    );
+    let results = run_monte_carlo(100, DynamicsParams::default(), noise, aero, rcs, cfg);
     let mut rms_pos = 0.0;
     let mut rms_vel = 0.0;
     let mut rms_att = 0.0;
@@ -40,7 +33,15 @@ fn main() -> anyhow::Result<()> {
     println!("RMS pos (m): {:.2}", rms_pos / n);
     println!("RMS vel (m/s): {:.3}", rms_vel / n);
     println!("RMS att (deg): {:.4}", rms_att / n);
-    println!("NEES mean: {:.3}, coverage: {:.2}%", nees / n, 100.0 * nees_cov / n);
-    println!("NIS  mean: {:.3}, coverage: {:.2}%", nis / n, 100.0 * nis_cov / n);
+    println!(
+        "NEES mean: {:.3}, coverage: {:.2}%",
+        nees / n,
+        100.0 * nees_cov / n
+    );
+    println!(
+        "NIS  mean: {:.3}, coverage: {:.2}%",
+        nis / n,
+        100.0 * nis_cov / n
+    );
     Ok(())
 }

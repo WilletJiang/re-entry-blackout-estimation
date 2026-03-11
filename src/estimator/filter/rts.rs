@@ -76,7 +76,8 @@ fn state_error(target: &crate::types::State, base: &crate::types::State) -> VecN
     v.fixed_rows_mut::<3>(3).copy_from(&(target.v - base.v));
     let dq = target.q * base.q.inverse();
     v.fixed_rows_mut::<3>(6).copy_from(&dq.scaled_axis());
-    v.fixed_rows_mut::<3>(9).copy_from(&(target.omega - base.omega));
+    v.fixed_rows_mut::<3>(9)
+        .copy_from(&(target.omega - base.omega));
     v.fixed_rows_mut::<3>(12).copy_from(&(target.bg - base.bg));
     v.fixed_rows_mut::<3>(15).copy_from(&(target.ba - base.ba));
     v.fixed_rows_mut::<3>(18)

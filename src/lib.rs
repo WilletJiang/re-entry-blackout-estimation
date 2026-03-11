@@ -1,19 +1,19 @@
-pub mod types;
 pub mod data;
-pub mod physics;
 pub mod estimator;
-#[cfg(feature = "diagnostics")]
-pub mod sim;
+pub mod physics;
 #[cfg(feature = "diagnostics")]
 pub mod plot;
+#[cfg(feature = "diagnostics")]
+pub mod sim;
+pub mod types;
 pub mod util;
 
-pub use types::*;
 pub use data::*;
-pub use physics::*;
 pub use estimator::*;
-#[cfg(feature = "diagnostics")]
-pub use sim::*;
+pub use physics::*;
 #[cfg(feature = "diagnostics")]
 pub use plot::*;
+#[cfg(feature = "diagnostics")]
+pub use sim::*;
+pub use types::*;
 pub use util::*;

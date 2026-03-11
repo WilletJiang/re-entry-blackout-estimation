@@ -1,6 +1,15 @@
 use super::{history::Event, Estimator, MatN};
 
 impl Estimator {
+    pub(super) fn replay_tail(&mut self, replay_events: Option<Vec<Event>>) {
+        let Some(events) = replay_events else {
+            return;
+        };
+        for event in events {
+            self.replay_event(event);
+        }
+    }
+
     pub(super) fn rewind_if_needed(&mut self, t_meas: f64) -> Option<Vec<Event>> {
         if t_meas >= self.state.t - 1e-9 {
             return None;
@@ -50,9 +59,14 @@ impl Estimator {
         match ev {
             Event::Imu(log) => self.propagate_internal(log.sample, true),
             Event::Gnss(m) => self.process_gnss(m, true, false),
+            Event::GpsRaw(m) => self.process_gps_raw(m, true, false),
             Event::Star(m) => self.process_star(m, true, false),
             Event::Radar(m) => self.process_radar(m, true, false),
-            Event::InflateRv { t: _, pos_scale, vel_scale } => {
+            Event::InflateRv {
+                t: _,
+                pos_scale,
+                vel_scale,
+            } => {
                 self.inflate_rv(pos_scale, vel_scale);
                 self.maybe_checkpoint(true);
             }

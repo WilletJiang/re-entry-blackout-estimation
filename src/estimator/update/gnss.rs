@@ -1,8 +1,6 @@
 use super::{
-    gating::chi_square_gate,
-    history::Event,
-    math::chol_lower_with_enforce,
-    Estimator, GnssMeas, MatN, MeasMat,
+    history::Event, math::chol_lower_with_enforce, robust::ROBUST_SENSOR_GNSS_PVT, Estimator,
+    GnssMeas, MatN, MeasMat,
 };
 use crate::types::STATE_DIM;
 use crate::util::enforce_pd;
@@ -74,8 +72,9 @@ impl Estimator {
             h[(i + 3, i + 3)] = 1.0;
         }
         let z = SVector::<f64, 6>::from_iterator(meas.pos.iter().chain(meas.vel.iter()).cloned());
-        let hx =
-            SVector::<f64, 6>::from_iterator(self.state.r.iter().chain(self.state.v.iter()).cloned());
+        let hx = SVector::<f64, 6>::from_iterator(
+            self.state.r.iter().chain(self.state.v.iter()).cloned(),
+        );
         let innov = z - hx;
 
         let p_prior = self.l_cov * self.l_cov.transpose();
@@ -87,7 +86,22 @@ impl Estimator {
         let s = h * p_prior * h.transpose() + meas.r_cov;
         let s_chol = match Cholesky::new(s) {
             Some(c) => c,
-            None => return,
+            None => {
+                self.replay_tail(replay_events);
+                return;
+            }
+        };
+        let s_inv = s_chol.inverse();
+        let base_d2 = (innov.transpose() * s_inv * innov)[(0, 0)];
+        let r_cov = self.robust_scale(ROBUST_SENSOR_GNSS_PVT, 6, base_d2, meas.r_cov);
+
+        let s = h * p_prior * h.transpose() + r_cov;
+        let s_chol = match Cholesky::new(s) {
+            Some(c) => c,
+            None => {
+                self.replay_tail(replay_events);
+                return;
+            }
         };
         let s_inv = s_chol.inverse();
         let d2 = (innov.transpose() * s_inv.clone() * innov)[(0, 0)];
@@ -96,7 +110,7 @@ impl Estimator {
             self.trace_gnss_pre(meas.t, &innov, d2);
         }
 
-        let gate_sq = chi_square_gate(6, self.noise.nis_alpha);
+        let gate_sq = self.robust_gate_sq(6, self.noise.nis_alpha);
         let accepted = d2.is_finite() && d2 <= gate_sq;
         self.last_gnss_accepted = Some((meas.t, accepted));
         if !accepted {
@@ -105,12 +119,14 @@ impl Estimator {
                 self.inflate_rv(1_000.0, 100.0);
                 self.gnss_reject_streak = 0;
             }
+            self.replay_tail(replay_events);
             return;
         }
         self.gnss_reject_streak = 0;
+        self.update_iae_scale(ROBUST_SENSOR_GNSS_PVT, 6, d2);
 
         self.bias_cal.from_pvt = true;
-        self.bias_cal_observe_rv(meas.t, meas.pos, meas.vel, &meas.r_cov);
+        self.bias_cal_observe_rv(meas.t, meas.pos, meas.vel, &r_cov);
 
         let mut k = p_prior * h.transpose() * s_inv;
         self.apply_gnss_active_set(meas.t, &innov, &mut k);
@@ -119,7 +135,7 @@ impl Estimator {
         self.apply_state_error(dx);
 
         let i_kh = MatN::identity() - k * h;
-        let mut p_new = i_kh * p_prior * i_kh.transpose() + k * meas.r_cov * k.transpose();
+        let mut p_new = i_kh * p_prior * i_kh.transpose() + k * r_cov * k.transpose();
         enforce_pd(&mut p_new);
         self.l_cov = chol_lower_with_enforce(p_new, "process_gnss");
 
@@ -140,11 +156,7 @@ impl Estimator {
         if record {
             self.history.push_event(Event::Gnss(meas));
         }
-        if let Some(ev) = replay_events {
-            for e in ev {
-                self.replay_event(e);
-            }
-        }
+        self.replay_tail(replay_events);
     }
 
     fn apply_gnss_active_set(&self, t: f64, innov: &SVector<f64, 6>, k: &mut Gain6) {

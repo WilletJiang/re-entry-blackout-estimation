@@ -51,7 +51,7 @@ gantt
 ```
 
 **Key challenges:**
-- **Asynchronous multi-rate sensors**: IMU (400 Hz), GNSS (10 Hz), star tracker (4 Hz), radar altimeter (50 Hz)
+- **Asynchronous multi-rate sensors**: IMU (400 Hz), GNSS (10 Hz), star tracker (2 Hz), radar altimeter (20 Hz)
 - **Delayed/out-of-order measurements**: star tracker and radar have fixed latencies
 - **Observation degeneracy**: no GNSS during blackout; partial observability only
 - **Non-ideal measurements**: dropouts, outliers, geometric degeneracy
@@ -61,17 +61,25 @@ gantt
 - **Square-root error-state EKF** for numerical stability and proper quaternion handling
 - **Fixed-lag RTS smoothing** to improve blackout-phase estimates using post-blackout information
 - **Rewind-replay time alignment** for delayed measurements
+- **Replay-safe tight coupling**: raw pseudorange + Doppler updates participate in the same fixed-lag event replay path
+- **Shared nominal dynamics**: truth and filter both call the same aerodynamic/RCS composition helper
 - **Tight coupling** (optional): fuse raw pseudorange + Doppler for improved velocity capture
-- **Robust gating and outlier rejection**
+- **Robust gating and adaptive covariance scaling** with configurable chi-square gates, Student-t inflation, and optional IAE
 
-## Results
+## Current 500-run Benchmark
 
 | Mode | Monte Carlo (500 runs) | Pass Rate |
 |------|------------------------|-----------|
 | Tight | `TIGHT=1 harness 500` | **100.0%** (500/500) |
 | PVT | `harness 500` | **97.0%** (485/500) |
 
+Additional release-build quick regression on 2026-03-11 (`harness 100`):
+
+- Tight: **100.0%** (100/100)
+- PVT: **96.0%** (96/100)
+
 Full mission specification and acceptance criteria: see [`tasks.md`](tasks.md).
+For the current codebase validation flow and fresh rerun commands, see [`docs/verification.md`](docs/verification.md).
 
 
 
@@ -113,7 +121,7 @@ Tight-coupled GNSS (raw pseudorange + Doppler):
 TIGHT=1 cargo run --release --bin harness -- 500
 ```
 
-The harness writes:
+The harness writes under `output/` by default:
 
 - `mc_summary_{pvt|tight}.csv` (per-run metrics + pass flag)
 - `mc_nees_blocks_{pvt|tight}.csv` (NEES by state block)
@@ -172,7 +180,7 @@ Star tracker and radar measurements are **delayed** in the task spec. This repo 
 - apply the update at `t_meas`,
 - replay the remaining events back to “now”.
 
-This keeps state/covariance updates time-consistent (no “approximate innovation at current time” hacks).
+This keeps state/covariance updates time-consistent (no “approximate innovation at current time” hacks). The same event log now records raw GPS updates as well, so tight-coupled GNSS can be replayed deterministically when it arrives out of order.
 
 ### Tight vs PVT
 
@@ -190,9 +198,9 @@ Core modules live in `src/`:
 
 | Module | Purpose |
 | --- | --- |
-| `src/estimator.rs` | SR-EKF time update (QR), measurement updates (GNSS/Star/Radar), tight raw update, **rewind/replay time alignment**, bias pre-calibration, history buffer + RTS smoothing |
-| `src/sim.rs` | Truth + sensor simulation, dropout/outlier injection, blackout phases, Monte Carlo metrics and pass criteria |
-| `src/physics.rs` | Aerodynamic force/torque model interface used by truth and filter |
+| `src/estimator/` | SR-EKF time update (QR), measurement updates (GNSS/Star/Radar/raw GPS), **rewind/replay time alignment**, replay-safe history buffer, bias pre-calibration, adaptive robustness, RTS smoothing |
+| `src/sim/` | Truth + sensor simulation, dropout/outlier injection, blackout phases, Monte Carlo metrics and pass criteria |
+| `src/physics.rs` | Shared nominal aerodynamic/RCS dynamics helper used by both truth propagation and filter-side model linearization |
 | `src/data.rs` | Loads vehicle properties / aero tables / RCS series from `data/` |
 | `src/plot.rs` | Writes CSVs and SVG plots for harness outputs |
 | `src/types.rs` | State, noise, and parameter definitions (`NoiseParams`, `STATE_DIM`, etc.) |
@@ -229,7 +237,7 @@ Outputs are regenerated on each harness run (see section 2).
 
 Typical extensions:
 
-- Add a new sensor: implement an update in `src/estimator.rs` and inject events in `src/sim.rs`.
+- Add a new sensor: implement an update in `src/estimator/` and inject events in `src/sim/`.
 - Add/retune process noise: extend `NoiseParams` in `src/types.rs` and wire into `process_noise()`.
 - Swap tight coupling models: edit `update_gps_raw_ref()` measurement model / gating / robustification.
 - Build “on-board style” library: `--no-default-features --features flight` (no sim/plot bins).

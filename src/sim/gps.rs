@@ -1,6 +1,9 @@
 use nalgebra::Vector3;
 
-pub(super) fn generate_gps_sats(t: f64, user_pos: Vector3<f64>) -> Vec<(Vector3<f64>, Vector3<f64>)> {
+pub(super) fn generate_gps_sats(
+    t: f64,
+    user_pos: Vector3<f64>,
+) -> Vec<(Vector3<f64>, Vector3<f64>)> {
     const PLANES: usize = 6;
     const SATS_PER_PLANE: usize = 4;
 

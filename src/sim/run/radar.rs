@@ -17,7 +17,9 @@ impl SimRun {
             self.dyn_params.radius_earth,
             &self.truth,
         );
-        if alt_true >= self.cfg.radar_max_alt || self.rng.gen_range(0.0..1.0) <= self.cfg.dropout_rate {
+        if alt_true >= self.cfg.radar_max_alt
+            || self.rng.gen_range(0.0..1.0) <= self.cfg.dropout_rate
+        {
             return;
         }
         let alt_meas = alt_true

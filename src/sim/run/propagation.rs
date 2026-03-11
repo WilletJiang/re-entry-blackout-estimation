@@ -1,4 +1,5 @@
 use super::SimRun;
+use crate::physics::NominalBodyDynamics;
 use crate::types::ImuSample;
 use nalgebra::{UnitQuaternion, Vector3};
 use rand_distr::Distribution;
@@ -41,9 +42,9 @@ impl SimRun {
         t: f64,
         tau_b: Vector3<f64>,
         f_b: Vector3<f64>,
-        aero_rt: &crate::physics::AeroResult,
+        nominal_truth: &NominalBodyDynamics,
     ) {
-        let acc_b = (aero_rt.force_b + f_b + self.truth.aero_res_force) / self.dyn_params.mass;
+        let acc_b = nominal_truth.specific_force_b;
         let imu_true_acc = acc_b;
         let imu_gyro = self.truth.omega;
         let acc_meas = imu_true_acc
@@ -70,14 +71,9 @@ impl SimRun {
         });
     }
 
-    pub(super) fn propagate_truth(
-        &mut self,
-        tau_b: Vector3<f64>,
-        f_b: Vector3<f64>,
-        aero_rt: &crate::physics::AeroResult,
-    ) {
+    pub(super) fn propagate_truth(&mut self, nominal_truth: &NominalBodyDynamics) {
         self.truth.omega += self.inertia_inv
-            * (tau_b + aero_rt.torque_b + self.truth.aero_res_torque
+            * (nominal_truth.total_torque_b
                 - self
                     .truth
                     .omega
@@ -87,9 +83,7 @@ impl SimRun {
             (self.truth.q * UnitQuaternion::from_scaled_axis(self.truth.omega * self.cfg.dt))
                 .into_inner(),
         );
-        let force_nav = self.truth.q.to_rotation_matrix()
-            * (aero_rt.force_b + f_b + self.truth.aero_res_force)
-            / self.dyn_params.mass
+        let force_nav = self.truth.q.to_rotation_matrix() * nominal_truth.specific_force_b
             + self.est.gravity(&self.truth.r);
         self.truth.r += self.truth.v * self.cfg.dt + 0.5 * force_nav * self.cfg.dt * self.cfg.dt;
         self.truth.v += force_nav * self.cfg.dt;
@@ -100,4 +94,3 @@ impl SimRun {
         self.truth_hist.push(self.truth.clone());
     }
 }
-

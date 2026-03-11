@@ -14,8 +14,9 @@ impl SimRun {
         }
         let star_delay = 0.12;
         let meas_time = t - star_delay;
-        let q_true_at_meas = metrics::find_truth_q_at(&self.truth_times, &self.truth_hist, meas_time)
-            .unwrap_or(self.truth.q);
+        let q_true_at_meas =
+            metrics::find_truth_q_at(&self.truth_times, &self.truth_hist, meas_time)
+                .unwrap_or(self.truth.q);
         let noise_axis = Vector3::new(
             20e-6 * self.standard_normal.sample(&mut self.rng),
             20e-6 * self.standard_normal.sample(&mut self.rng),
@@ -32,4 +33,3 @@ impl SimRun {
         self.star_update_count += 1;
     }
 }
-

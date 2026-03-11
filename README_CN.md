@@ -52,7 +52,7 @@ gantt
 ```
 
 **核心挑战：**
-- **异步多频率传感器**：IMU (400 Hz)、GNSS (10 Hz)、星敏 (4 Hz)、雷达高度计 (50 Hz)
+- **异步多频率传感器**：IMU (400 Hz)、GNSS (10 Hz)、星敏 (2 Hz)、雷达高度计 (20 Hz)
 - **延迟/乱序量测**：星敏和雷达存在固定延迟
 - **观测退化**：黑障期间 GNSS 不可用，仅有部分可观性
 - **非理想量测**：dropout、离群值、几何退化
@@ -62,17 +62,25 @@ gantt
 - **Square-root 误差状态 EKF**：保证数值稳定性，正确处理姿态四元数
 - **固定滞后 RTS 平滑**：利用黑障后信息改善黑障期间估计
 - **回退-重放时间对齐**：处理延迟量测
+- **可回放的 tight 耦合链路**：原始伪距/多普勒更新进入与其他传感器一致的固定滞后事件回放
+- **共享 nominal 动力学**：真值与滤波器使用同一套气动/RCS 合成 helper
 - **Tight coupling**（可选）：直接融合伪距/多普勒，提升速度捕获能力
-- **鲁棒门限与离群剔除**
+- **鲁棒门限与自适应协方差缩放**：支持可配置 $\chi^2$ 门限、Student-t 膨胀与可选 IAE
 
-## 结果
+## 当前 500 次 Monte Carlo 基准
 
 | 模式 | Monte Carlo (500 次) | 通过率 |
 |------|----------------------|--------|
 | Tight | `TIGHT=1 harness 500` | **100.0%** (500/500) |
 | PVT | `harness 500` | **97.0%** (485/500) |
 
+额外的 2026-03-11 release quick regression（`harness 100`）结果：
+
+- Tight：**100.0%** (100/100)
+- PVT：**96.0%** (96/100)
+
 完整任务书与验收指标见 [`tasks.md`](tasks.md)。
+当前代码库的验证流程与最新复跑命令见 [`docs/verification.md`](docs/verification.md)。
 
 ---
 
@@ -112,7 +120,7 @@ Tight 耦合（伪距 + 多普勒原始量测）：
 TIGHT=1 cargo run --release --bin harness -- 500
 ```
 
-harness 会生成：
+harness 默认会在 `output/` 下生成：
 
 - `mc_summary_{pvt|tight}.csv`（每条 MC 的指标与 pass 标记）
 - `mc_nees_blocks_{pvt|tight}.csv`（按状态块分解的 NEES）
@@ -171,7 +179,7 @@ TRACE_GNSS=1 TIGHT=1 cargo run --release --bin repro -- 231
 - 在 `t_meas` 执行量测更新，
 - 再重放剩余事件回到“当前”。
 
-这样可以保证协方差与状态更新在统计意义上保持时间一致（避免在当前时刻做近似创新）。
+这样可以保证协方差与状态更新在统计意义上保持时间一致（避免在当前时刻做近似创新）。raw GPS tight-coupled 更新现在也会写入同一套事件日志，因此乱序到达时同样可以做确定性回放。
 
 ### Tight 与 PVT 的区别
 
@@ -189,9 +197,9 @@ TRACE_GNSS=1 TIGHT=1 cargo run --release --bin repro -- 231
 
 | 模块 | 作用 |
 | --- | --- |
-| `src/estimator.rs` | SR-EKF（QR time update）、GNSS/星敏/雷达更新、tight 原始量测更新、**回退/重放时间对齐**、bias 预校准、历史缓冲与 RTS smoothing |
-| `src/sim.rs` | 真值与传感器仿真、缺测/离群注入、黑障相位、Monte Carlo 指标与 pass 判据 |
-| `src/physics.rs` | 气动力/力矩模型接口（真值与滤波共同使用） |
+| `src/estimator/` | SR-EKF（QR time update）、GNSS/星敏/雷达/raw GPS 更新、**回退/重放时间对齐**、可回放历史缓冲、bias 预校准、自适应鲁棒化、RTS smoothing |
+| `src/sim/` | 真值与传感器仿真、缺测/离群注入、黑障相位、Monte Carlo 指标与 pass 判据 |
+| `src/physics.rs` | 真值传播与滤波器侧 nominal 线性化共同使用的气动/RCS 动力学 helper |
 | `src/data.rs` | 从 `data/` 加载载具参数/气动表/RCS 序列 |
 | `src/plot.rs` | harness 输出 CSV + SVG |
 | `src/types.rs` | 状态与噪声参数定义（`NoiseParams` 等） |
@@ -228,7 +236,7 @@ CLI：
 
 常见扩展方式：
 
-- 新增传感器：在 `src/estimator.rs` 增加更新函数，并在 `src/sim.rs` 注入事件。
+- 新增传感器：在 `src/estimator/` 增加更新函数，并在 `src/sim/` 注入事件。
 - 调整过程噪声：扩展 `src/types.rs` 的 `NoiseParams` 并接入 `process_noise()`。
 - 替换 tight 量测模型：修改 `update_gps_raw_ref()` 的 H/创新/门限/鲁棒化策略。
 - Onboard 风格：`--no-default-features --features flight`（不编译 sim/plot）。

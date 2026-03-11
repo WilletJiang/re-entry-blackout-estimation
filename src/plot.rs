@@ -2,7 +2,7 @@ use crate::sim::{BlackoutTrace, BlackoutTraceConfig, MonteCarloResult};
 use plotters::element::PathElement;
 use plotters::prelude::*;
 use std::fs::File;
-use std::io::{Write, BufWriter};
+use std::io::{BufWriter, Write};
 
 pub fn plot_nees_nis(results: &[MonteCarloResult], path: &str) -> anyhow::Result<()> {
     let root = SVGBackend::new(path, (900, 500)).into_drawing_area();
@@ -19,7 +19,11 @@ pub fn plot_nees_nis(results: &[MonteCarloResult], path: &str) -> anyhow::Result
         .x_label_area_size(35)
         .y_label_area_size(50)
         .build_cartesian_2d(0.0..max_run, 0.0..max_val)?;
-    chart.configure_mesh().x_desc("run").y_desc("value").draw()?;
+    chart
+        .configure_mesh()
+        .x_desc("run")
+        .y_desc("value")
+        .draw()?;
     // 95% chi2 lines for dof 6 and 3
     chart.draw_series(std::iter::once(PathElement::new(
         vec![(0.0, 12.592), (max_run, 12.592)],
@@ -31,14 +35,20 @@ pub fn plot_nees_nis(results: &[MonteCarloResult], path: &str) -> anyhow::Result
     )))?;
     chart
         .draw_series(LineSeries::new(
-            results.iter().enumerate().map(|(i, r)| (i as f64, r.nees_mean)),
+            results
+                .iter()
+                .enumerate()
+                .map(|(i, r)| (i as f64, r.nees_mean)),
             &BLUE,
         ))?
         .label("NEES mean")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &BLUE));
     chart
         .draw_series(LineSeries::new(
-            results.iter().enumerate().map(|(i, r)| (i as f64, r.nis_mean)),
+            results
+                .iter()
+                .enumerate()
+                .map(|(i, r)| (i as f64, r.nis_mean)),
             &RED,
         ))?
         .label("NIS mean")
@@ -64,31 +74,40 @@ pub fn plot_histogram(results: &[MonteCarloResult], path: &str) -> anyhow::Resul
     }
     let y_max = counts.iter().cloned().max().unwrap_or(1) + 1;
     let mut chart = ChartBuilder::on(&root)
-        .caption("RMS Position Error Histogram (3σ≤40 m target)", ("sans-serif", 24))
+        .caption(
+            "RMS Position Error Histogram (3σ≤40 m target)",
+            ("sans-serif", 24),
+        )
         .margin(15)
         .x_label_area_size(35)
         .y_label_area_size(50)
         .build_cartesian_2d(0f64..max_v, 0u32..y_max)?;
-    chart.configure_mesh().x_desc("RMS pos (m)").y_desc("count").draw()?;
+    chart
+        .configure_mesh()
+        .x_desc("RMS pos (m)")
+        .y_desc("count")
+        .draw()?;
     // acceptance line at 40/3 ≈ 13.33 m (RMS corresponding to 3σ 40 m)
     let accept = 40.0 / 3.0;
     chart.draw_series(std::iter::once(PathElement::new(
         vec![(accept, 0u32), (accept, y_max as u32)],
         &BLUE.mix(0.4),
     )))?;
-    chart.draw_series(
-        (0..bins).map(|i| {
-            let x0 = i as f64 * bin_w;
-            let x1 = x0 + bin_w;
-            let y = counts[i];
-            Rectangle::new([(x0, 0u32), (x1, y)], RED.mix(0.5).filled())
-        }),
-    )?;
+    chart.draw_series((0..bins).map(|i| {
+        let x0 = i as f64 * bin_w;
+        let x1 = x0 + bin_w;
+        let y = counts[i];
+        Rectangle::new([(x0, 0u32), (x1, y)], RED.mix(0.5).filled())
+    }))?;
     Ok(())
 }
 
 // Bias RMS histograms (gyro in deg/s, accel in µg)
-pub fn plot_bias_histograms(results: &[MonteCarloResult], path_bg: &str, path_ba: &str) -> anyhow::Result<()> {
+pub fn plot_bias_histograms(
+    results: &[MonteCarloResult],
+    path_bg: &str,
+    path_ba: &str,
+) -> anyhow::Result<()> {
     // Gyro bias (deg/s)
     {
         let vals: Vec<f64> = results.iter().map(|r| r.bias_bg_rms_dps).collect();
@@ -104,25 +123,30 @@ pub fn plot_bias_histograms(results: &[MonteCarloResult], path_bg: &str, path_ba
         }
         let y_max = counts.iter().cloned().max().unwrap_or(1) + 1;
         let mut chart = ChartBuilder::on(&root)
-            .caption("Gyro bias RMS (deg/s) histogram (≤0.005 target)", ("sans-serif", 24))
+            .caption(
+                "Gyro bias RMS (deg/s) histogram (≤0.005 target)",
+                ("sans-serif", 24),
+            )
             .margin(15)
             .x_label_area_size(35)
             .y_label_area_size(50)
             .build_cartesian_2d(0f64..max_v, 0u32..y_max)?;
-        chart.configure_mesh().x_desc("deg/s").y_desc("count").draw()?;
+        chart
+            .configure_mesh()
+            .x_desc("deg/s")
+            .y_desc("count")
+            .draw()?;
         let accept = 0.005;
         chart.draw_series(std::iter::once(PathElement::new(
             vec![(accept, 0u32), (accept, y_max as u32)],
             &BLUE.mix(0.4),
         )))?;
-        chart.draw_series(
-            (0..bins).map(|i| {
-                let x0 = i as f64 * bin_w;
-                let x1 = x0 + bin_w;
-                let y = counts[i];
-                Rectangle::new([(x0, 0u32), (x1, y)], RED.mix(0.5).filled())
-            }),
-        )?;
+        chart.draw_series((0..bins).map(|i| {
+            let x0 = i as f64 * bin_w;
+            let x1 = x0 + bin_w;
+            let y = counts[i];
+            Rectangle::new([(x0, 0u32), (x1, y)], RED.mix(0.5).filled())
+        }))?;
     }
     // Accel bias (µg)
     {
@@ -139,7 +163,10 @@ pub fn plot_bias_histograms(results: &[MonteCarloResult], path_bg: &str, path_ba
         }
         let y_max = counts.iter().cloned().max().unwrap_or(1) + 1;
         let mut chart = ChartBuilder::on(&root)
-            .caption("Accel bias RMS (µg) histogram (≤120 target)", ("sans-serif", 24))
+            .caption(
+                "Accel bias RMS (µg) histogram (≤120 target)",
+                ("sans-serif", 24),
+            )
             .margin(15)
             .x_label_area_size(35)
             .y_label_area_size(50)
@@ -150,14 +177,12 @@ pub fn plot_bias_histograms(results: &[MonteCarloResult], path_bg: &str, path_ba
             vec![(accept, 0u32), (accept, y_max as u32)],
             &BLUE.mix(0.4),
         )))?;
-        chart.draw_series(
-            (0..bins).map(|i| {
-                let x0 = i as f64 * bin_w;
-                let x1 = x0 + bin_w;
-                let y = counts[i];
-                Rectangle::new([(x0, 0u32), (x1, y)], RED.mix(0.5).filled())
-            }),
-        )?;
+        chart.draw_series((0..bins).map(|i| {
+            let x0 = i as f64 * bin_w;
+            let x1 = x0 + bin_w;
+            let y = counts[i];
+            Rectangle::new([(x0, 0u32), (x1, y)], RED.mix(0.5).filled())
+        }))?;
     }
     Ok(())
 }
@@ -168,14 +193,23 @@ pub fn plot_pass_rate(results: &[MonteCarloResult], path: &str) -> anyhow::Resul
     root.fill(&WHITE)?;
     let total = results.len() as f64;
     let passed = results.iter().filter(|r| r.passed).count() as f64;
-    let rate = if total > 0.0 { passed / total * 100.0 } else { 0.0 };
+    let rate = if total > 0.0 {
+        passed / total * 100.0
+    } else {
+        0.0
+    };
     let mut chart = ChartBuilder::on(&root)
         .caption(format!("Pass rate: {:.1}%", rate), ("sans-serif", 24))
         .margin(15)
         .x_label_area_size(30)
         .y_label_area_size(40)
         .build_cartesian_2d(0.0..100.0, 0.0..1.0)?;
-    chart.configure_mesh().x_desc("percent").disable_y_mesh().y_labels(0).draw()?;
+    chart
+        .configure_mesh()
+        .x_desc("percent")
+        .disable_y_mesh()
+        .y_labels(0)
+        .draw()?;
     chart.draw_series(std::iter::once(PathElement::new(
         vec![(0.0, 0.5), (rate, 0.5)],
         &GREEN,
@@ -207,7 +241,11 @@ pub fn write_blackout_envelope_csv(
     for i in 0..n {
         let t = cfg.time_at(i);
         let (p50, p95, sigma3, nees) = summarize_trace_sample(traces, i);
-        writeln!(w, "{:.6},{:.6},{:.6},{:.6},{:.6}", t, p50, p95, sigma3, nees)?;
+        writeln!(
+            w,
+            "{:.6},{:.6},{:.6},{:.6},{:.6}",
+            t, p50, p95, sigma3, nees
+        )?;
     }
     Ok(())
 }
@@ -415,7 +453,6 @@ fn quantile_sorted(vals: &[f32], q: f64) -> f32 {
     vals[idx.min(vals.len() - 1)]
 }
 
-
 pub fn write_summary_csv(results: &[MonteCarloResult], path: &str) -> anyhow::Result<()> {
     let f = File::create(path)?;
     let mut w = BufWriter::new(f);
@@ -461,12 +498,7 @@ pub fn write_post_window_csv(results: &[MonteCarloResult], path: &str) -> anyhow
         writeln!(
             w,
             "{},{},{},{:.6},{:.6},{}",
-            i,
-            r.post_gnss_updates,
-            r.post_gnss_accepted,
-            rate,
-            r.post_sat_mean,
-            r.post_sat_min
+            i, r.post_gnss_updates, r.post_gnss_accepted, rate, r.post_sat_mean, r.post_sat_min
         )?;
     }
     Ok(())

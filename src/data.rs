@@ -26,13 +26,16 @@ struct VehiclePropsRow {
 
 pub fn load_vehicle_props(path: impl AsRef<Path>) -> Result<DynamicsParams> {
     let mut rdr = csv::Reader::from_path(path)?;
-    let row: VehiclePropsRow = rdr.deserialize().next().ok_or_else(|| {
-        anyhow::anyhow!("vehicle properties file empty or parse error")
-    })??;
+    let row: VehiclePropsRow = rdr
+        .deserialize()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("vehicle properties file empty or parse error"))??;
     Ok(DynamicsParams {
         mass: row.mass_kg,
         inertia: nalgebra::Matrix3::from_diagonal(&Vector3::new(
-            row.jx_kgm2, row.jy_kgm2, row.jz_kgm2,
+            row.jx_kgm2,
+            row.jy_kgm2,
+            row.jz_kgm2,
         )),
         s_ref: row.s_ref_m2,
         b_ref: row.b_ref_m,
@@ -117,9 +120,18 @@ impl AeroTable {
             n_m * n_a * n_b
         ];
         for r in rows {
-            let mi = mach.iter().position(|&m| (m - r.Mach).abs() < 1e-8).unwrap();
-            let ai = alpha.iter().position(|&a| (a - r.alpha_deg).abs() < 1e-8).unwrap();
-            let bi = beta.iter().position(|&b| (b - r.beta_deg).abs() < 1e-8).unwrap();
+            let mi = mach
+                .iter()
+                .position(|&m| (m - r.Mach).abs() < 1e-8)
+                .unwrap();
+            let ai = alpha
+                .iter()
+                .position(|&a| (a - r.alpha_deg).abs() < 1e-8)
+                .unwrap();
+            let bi = beta
+                .iter()
+                .position(|&b| (b - r.beta_deg).abs() < 1e-8)
+                .unwrap();
             let idx = (mi * n_a + ai) * n_b + bi;
             coeffs[idx] = AeroCoeff {
                 cx: r.Cx,

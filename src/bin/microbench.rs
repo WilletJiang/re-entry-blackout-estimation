@@ -1,7 +1,7 @@
-use entry_blackout_estimation::estimator::{Estimator, GnssMeas};
-use entry_blackout_estimation::types::{DynamicsParams, ImuSample, NoiseParams};
 #[cfg(feature = "diagnostics")]
 use entry_blackout_estimation::estimator::GpsSatMeas;
+use entry_blackout_estimation::estimator::{Estimator, GnssMeas};
+use entry_blackout_estimation::types::{DynamicsParams, ImuSample, NoiseParams};
 use nalgebra::{Matrix6, UnitQuaternion, Vector3};
 use std::time::Instant;
 

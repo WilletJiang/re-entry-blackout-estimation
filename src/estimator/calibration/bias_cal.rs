@@ -156,6 +156,11 @@ impl Estimator {
         SnapshotInternal {
             bias_cal: self.bias_cal.clone(),
             gnss_reject_streak: self.gnss_reject_streak,
+            robust_gate_alpha: self.robust_gate_alpha,
+            robust_r_scale_cap: self.robust_r_scale_cap,
+            robust_student_nu: self.robust_student_nu,
+            iae_gamma: self.iae_gamma,
+            iae_scales: self.iae_scales,
             aero_learning_enabled: self.aero_learning_enabled,
             aero_learning_rate: self.aero_learning_rate,
             last_v_meas: self.last_v_meas,
@@ -167,6 +172,11 @@ impl Estimator {
     pub(super) fn restore_internal(&mut self, internal: SnapshotInternal) {
         self.bias_cal = internal.bias_cal;
         self.gnss_reject_streak = internal.gnss_reject_streak;
+        self.robust_gate_alpha = internal.robust_gate_alpha;
+        self.robust_r_scale_cap = internal.robust_r_scale_cap;
+        self.robust_student_nu = internal.robust_student_nu;
+        self.iae_gamma = internal.iae_gamma;
+        self.iae_scales = internal.iae_scales;
         self.aero_learning_enabled = internal.aero_learning_enabled;
         self.aero_learning_rate = internal.aero_learning_rate;
         self.last_v_meas = internal.last_v_meas;
@@ -259,8 +269,8 @@ impl Estimator {
             return (false, 0.0);
         }
 
-        let in_precal = self.allow_bias_precalibration
-            && t_meas <= self.precalibration_end_time + 1e-9;
+        let in_precal =
+            self.allow_bias_precalibration && t_meas <= self.precalibration_end_time + 1e-9;
         let in_postcal = if let Some((bs, be)) = self.blackout_window {
             let window = (be - bs).max(10.0);
             t_meas >= be && t_meas <= be + window
@@ -268,7 +278,11 @@ impl Estimator {
             false
         };
 
-        let max_step = if in_precal || in_postcal { base } else { 0.5 * base };
+        let max_step = if in_precal || in_postcal {
+            base
+        } else {
+            0.5 * base
+        };
         (true, max_step)
     }
 }

@@ -3,6 +3,7 @@ use super::{
     math::{chol_lower_with_enforce, insert_block, qr_r_upper_in_place},
     Estimator, Mat2NByN, MatN,
 };
+use crate::physics::nominal_body_dynamics_with_residual;
 use crate::types::{ImuSample, STATE_DIM};
 use crate::util::skew;
 use nalgebra::{Matrix3, UnitQuaternion, Vector3};
@@ -31,6 +32,8 @@ impl Estimator {
         let g_grad = self.gravity_gradient(&self.state.r);
         let delta_r = self.state.v * dt;
         let g_avg = g + 0.5 * g_grad * delta_r;
+        let linearize_specific_force_b =
+            self.nominal_specific_force_b(imu.force_cmd, imu.torque_cmd, accel_meas);
 
         let aero_correction = if self.aero_learning_enabled {
             self.learned_aero_correction
@@ -61,16 +64,17 @@ impl Estimator {
         self.state.aero_res_torque *= phi_t;
         self.state.t = imu.t;
 
-        let (phi, qk) = self.linearize(dt, accel_meas);
+        let (phi, qk) = self.linearize(dt, linearize_specific_force_b);
         self.time_update_sqrt(&phi, &qk);
         self.accumulate_segment(&phi, &qk);
         if record {
-            self.history.push_event(Event::Imu(LoggedImu { sample: imu }));
+            self.history
+                .push_event(Event::Imu(LoggedImu { sample: imu }));
         }
         self.maybe_checkpoint(false);
     }
 
-    pub(super) fn linearize(&self, dt: f64, accel_b: Vector3<f64>) -> (MatN, MatN) {
+    pub(super) fn linearize(&self, dt: f64, specific_force_b: Vector3<f64>) -> (MatN, MatN) {
         let mut phi = MatN::identity();
         let dt2 = dt * dt;
         let half_dt2 = 0.5 * dt2;
@@ -83,7 +87,7 @@ impl Estimator {
         insert_block(&mut phi, &dv_dr, 3, 0);
 
         let c = self.state.q.to_rotation_matrix().matrix().clone();
-        let a_nav = c * accel_b;
+        let a_nav = c * specific_force_b;
         let dr_datt = -skew(a_nav) * half_dt2;
         insert_block(&mut phi, &dr_datt, 0, 6);
         insert_block(&mut phi, &(-c * half_dt2), 0, 15);
@@ -137,5 +141,33 @@ impl Estimator {
     #[cfg(feature = "diagnostics")]
     pub fn bench_time_update_sqrt(&mut self, phi: &MatN, qk: &MatN) {
         self.time_update_sqrt(phi, qk);
+    }
+
+    fn nominal_specific_force_b(
+        &self,
+        force_cmd_b: Vector3<f64>,
+        torque_cmd_b: Vector3<f64>,
+        imu_specific_force_b: Vector3<f64>,
+    ) -> Vector3<f64> {
+        let Some(table) = self.aero_table.as_ref() else {
+            return imu_specific_force_b;
+        };
+        let nominal = nominal_body_dynamics_with_residual(
+            table.as_ref(),
+            &self.dyn_params,
+            self.state.r,
+            self.state.v,
+            &self.state.q,
+            self.state.omega,
+            force_cmd_b,
+            torque_cmd_b,
+            self.state.aero_res_force,
+            self.state.aero_res_torque,
+        );
+        let specific_force_b = nominal.specific_force_b;
+        if specific_force_b.iter().all(|value| value.is_finite()) {
+            return specific_force_b;
+        }
+        imu_specific_force_b
     }
 }

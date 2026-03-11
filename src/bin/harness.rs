@@ -1,18 +1,21 @@
 use entry_blackout_estimation::{
-    data::{AeroTable, RcsTorqueSeries},
-    plot::{plot_histogram, plot_nees_nis, plot_bias_histograms, plot_pass_rate, plot_blackout_envelope, plot_blackout_nees_time, write_blackout_envelope_csv, write_nees_blocks_csv, write_nees_phase_csv, write_post_window_csv, write_summary_csv},
-    sim::{run_monte_carlo, run_monte_carlo_with_trace, BiasJumpConfig, BlackoutTraceConfig, SimConfig},
-    types::NoiseParams,
     data::load_vehicle_props,
+    data::{AeroTable, RcsTorqueSeries},
+    plot::{
+        plot_bias_histograms, plot_blackout_envelope, plot_blackout_nees_time, plot_histogram,
+        plot_nees_nis, plot_pass_rate, write_blackout_envelope_csv, write_nees_blocks_csv,
+        write_nees_phase_csv, write_post_window_csv, write_summary_csv,
+    },
+    sim::{
+        run_monte_carlo, run_monte_carlo_with_trace, BiasJumpConfig, BlackoutTraceConfig, SimConfig,
+    },
+    types::NoiseParams,
 };
 use std::env;
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().collect();
-    let runs: usize = args
-        .get(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(100);
+    let runs: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(100);
 
     let out_dir = env::var("OUT_DIR").unwrap_or_else(|_| "output".to_string());
     std::fs::create_dir_all(&out_dir)?;
@@ -21,9 +24,7 @@ fn main() -> anyhow::Result<()> {
     let aero = AeroTable::load("data/Aero Coeff Table.csv")?;
     let rcs = RcsTorqueSeries::load("data/RCS Torque Series 100Hz Preview.csv")?;
     let mut cfg = SimConfig::default();
-    cfg.use_tight_coupling = std::env::var("TIGHT")
-        .ok()
-        .is_some_and(|v| v != "0");
+    cfg.use_tight_coupling = std::env::var("TIGHT").ok().is_some_and(|v| v != "0");
     if std::env::var("BIAS_JUMP").ok().is_some_and(|v| v != "0") {
         cfg.bias_jump = Some(BiasJumpConfig {
             t: 0.5 * (cfg.blackout_start + cfg.blackout_end),
@@ -31,11 +32,17 @@ fn main() -> anyhow::Result<()> {
             ba_step_ug: 80.0,
         });
     }
-    let mode = if cfg.use_tight_coupling { "tight" } else { "pvt" };
+    let mode = if cfg.use_tight_coupling {
+        "tight"
+    } else {
+        "pvt"
+    };
     let noise = NoiseParams::tuned();
 
     println!("Running {runs} Monte Carlo cases...");
-    let record_trace = std::env::var("BLACKOUT_TRACE").ok().is_some_and(|v| v != "0");
+    let record_trace = std::env::var("BLACKOUT_TRACE")
+        .ok()
+        .is_some_and(|v| v != "0");
     let (results, traces, trace_cfg) = if record_trace {
         let trace_cfg = BlackoutTraceConfig {
             t_start: (cfg.blackout_start - 10.0).max(0.0),
@@ -45,7 +52,8 @@ fn main() -> anyhow::Result<()> {
             blackout_end: cfg.blackout_end,
         };
         let out = run_monte_carlo_with_trace(runs, dyn_params, noise, aero, rcs, cfg, trace_cfg);
-        let (results, traces): (Vec<_>, Vec<_>) = out.into_iter().map(|o| (o.result, o.trace)).unzip();
+        let (results, traces): (Vec<_>, Vec<_>) =
+            out.into_iter().map(|o| (o.result, o.trace)).unzip();
         (results, Some(traces), Some(trace_cfg))
     } else {
         let results = run_monte_carlo(runs, dyn_params, noise, aero, rcs, cfg);
@@ -83,14 +91,26 @@ fn main() -> anyhow::Result<()> {
     plot_pass_rate(&results, &format!("{out_dir}/mc_pass_rate_{mode}.svg"))?;
 
     if let (Some(traces), Some(trace_cfg)) = (traces.as_ref(), trace_cfg) {
-        write_blackout_envelope_csv(traces, &trace_cfg, &format!("{out_dir}/mc_blackout_envelope.csv"))?;
+        write_blackout_envelope_csv(
+            traces,
+            &trace_cfg,
+            &format!("{out_dir}/mc_blackout_envelope.csv"),
+        )?;
         write_blackout_envelope_csv(
             traces,
             &trace_cfg,
             &format!("{out_dir}/mc_blackout_envelope_{mode}.csv"),
         )?;
-        plot_blackout_envelope(traces, &trace_cfg, &format!("{out_dir}/mc_blackout_envelope.svg"))?;
-        plot_blackout_nees_time(traces, &trace_cfg, &format!("{out_dir}/mc_blackout_nees_time.svg"))?;
+        plot_blackout_envelope(
+            traces,
+            &trace_cfg,
+            &format!("{out_dir}/mc_blackout_envelope.svg"),
+        )?;
+        plot_blackout_nees_time(
+            traces,
+            &trace_cfg,
+            &format!("{out_dir}/mc_blackout_nees_time.svg"),
+        )?;
         plot_blackout_envelope(
             traces,
             &trace_cfg,

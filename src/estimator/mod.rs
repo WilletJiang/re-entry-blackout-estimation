@@ -29,6 +29,8 @@ mod noise;
 mod propagate;
 #[path = "history/rewind.rs"]
 mod rewind;
+#[path = "support/robust.rs"]
+mod robust;
 #[path = "filter/rts.rs"]
 mod rts;
 #[path = "filter/state_ops.rs"]
@@ -114,6 +116,11 @@ pub struct Estimator {
     pub last_gnss_post_v: Option<Vector3<f64>>,
     pub last_gnss_accepted: Option<(f64, bool)>,
     gnss_reject_streak: u32,
+    robust_gate_alpha: Option<f64>,
+    robust_r_scale_cap: f64,
+    robust_student_nu: f64,
+    iae_gamma: Option<f64>,
+    iae_scales: [f64; robust::ROBUST_SENSOR_COUNT],
     aero_learning_enabled: bool,
     last_v_meas: Option<(f64, Vector3<f64>)>,
     pub learned_aero_correction: Vector3<f64>,

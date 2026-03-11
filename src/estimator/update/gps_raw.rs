@@ -1,9 +1,10 @@
-use super::{gating::chi_square_gate, math::chol_lower_with_enforce, Estimator, GpsRawMeas, GpsSatMeas, MatN};
+use super::{
+    gating::chi_square_gate, history::Event, math::chol_lower_with_enforce,
+    robust::ROBUST_SENSOR_GPS_RAW, Estimator, GpsRawMeas, GpsSatMeas, MatN,
+};
 use crate::types::STATE_DIM;
 use crate::util::enforce_pd;
-use nalgebra::{
-    linalg::Cholesky, DMatrix, DVector, Matrix3, Matrix6, SymmetricEigen, Vector3,
-};
+use nalgebra::{linalg::Cholesky, DMatrix, DVector, Matrix3, Matrix6, SymmetricEigen, Vector3};
 
 const GPS_RAW_MAX_ROWS: usize = 64;
 const ROW_PR: u8 = 0;
@@ -141,61 +142,113 @@ impl GpsRawLin {
         let d2 = (&model.innov.transpose() * &s_inv * &model.innov)[(0, 0)];
         let k = &p_dyn * model.h.transpose() * s_inv;
         let dx_raw = &k * &model.innov;
-        Some(Self { p_dyn, r, d2, k, dx_raw })
+        Some(Self {
+            p_dyn,
+            r,
+            d2,
+            k,
+            dx_raw,
+        })
     }
 }
 
 impl Estimator {
     pub fn update_gps_raw(&mut self, meas: GpsRawMeas) {
-        self.update_gps_raw_ref(meas.t, &meas.sats);
+        self.process_gps_raw(meas, true, true);
     }
 
     pub fn update_gps_raw_ref(&mut self, t: f64, sats: &[GpsSatMeas]) {
-        self.last_gnss_accepted = Some((t, false));
-        if sats.len() < 4 {
-            return;
-        }
+        self.process_gps_raw(
+            GpsRawMeas {
+                t,
+                sats: sats.to_vec(),
+            },
+            true,
+            true,
+        );
+    }
 
-        self.maybe_bias_cal_observe_gps_raw(t, sats);
-
-        let p = self.cov();
-        self.last_gnss_prior_t = Some(t);
-        self.last_gnss_prior_rv_p = Some(p.fixed_view::<6, 6>(0, 0).into_owned());
-        self.last_gnss_prior_r = Some(self.state.r);
-        self.last_gnss_prior_v = Some(self.state.v);
-
-        let Some(mut model) = GpsRawModel::build(self.state.r, self.state.v, sats) else {
-            return;
-        };
-        model.robustify_pseudorange(&p.fixed_view::<6, 6>(0, 0).into_owned());
-        let Some(mut lin) = GpsRawLin::compute(&p, &model) else {
-            return;
+    pub(super) fn process_gps_raw(&mut self, meas: GpsRawMeas, record: bool, allow_rewind: bool) {
+        let replay_events = if allow_rewind {
+            self.rewind_if_needed(meas.t)
+        } else {
+            None
         };
 
-        self.last_gnss_nis = Some((t, lin.d2, model.rows));
-        let gate_sq = gps_raw_gate_sq(model.rows, &self.noise);
-        if !lin.d2.is_finite() || lin.d2 > gate_sq {
-            return;
+        {
+            let t = meas.t;
+            let sats = meas.sats.as_slice();
+
+            self.last_gnss_accepted = Some((t, false));
+            if sats.len() < 4 {
+                self.replay_tail(replay_events);
+                return;
+            }
+
+            self.maybe_bias_cal_observe_gps_raw(t, sats);
+
+            let p = self.cov();
+            self.last_gnss_prior_t = Some(t);
+            self.last_gnss_prior_rv_p = Some(p.fixed_view::<6, 6>(0, 0).into_owned());
+            self.last_gnss_prior_r = Some(self.state.r);
+            self.last_gnss_prior_v = Some(self.state.v);
+
+            let Some(mut model) = GpsRawModel::build(self.state.r, self.state.v, sats) else {
+                self.replay_tail(replay_events);
+                return;
+            };
+            model.robustify_pseudorange(&p.fixed_view::<6, 6>(0, 0).into_owned());
+            let Some(base_lin) = GpsRawLin::compute(&p, &model) else {
+                self.replay_tail(replay_events);
+                return;
+            };
+            let raw_scale =
+                self.robust_covariance_scale(ROBUST_SENSOR_GPS_RAW, model.rows, base_lin.d2);
+            if raw_scale > 1.0 {
+                model.r_diag *= raw_scale;
+            }
+            let Some(mut lin) = GpsRawLin::compute(&p, &model) else {
+                self.replay_tail(replay_events);
+                return;
+            };
+
+            self.last_gnss_nis = Some((t, lin.d2, model.rows));
+            let gate_sq =
+                if self.noise.gps_raw_nis_gate.is_finite() && self.noise.gps_raw_nis_gate > 0.0 {
+                    self.noise.gps_raw_nis_gate
+                } else {
+                    self.robust_gate_sq(model.rows, self.noise.nis_alpha)
+                };
+            if !lin.d2.is_finite() || lin.d2 > gate_sq {
+                self.replay_tail(replay_events);
+                return;
+            }
+            self.last_gnss_accepted = Some((t, true));
+            self.update_iae_scale(ROBUST_SENSOR_GPS_RAW, model.rows, lin.d2);
+
+            self.apply_gps_raw_active_set(t, model.rows, &lin.dx_raw, &mut lin.k);
+            suppress_pseudorange_velocity(&model.row_kind, model.rows, &mut lin.k);
+            maybe_project_velocity_weak_direction(&mut lin.k, model.info_v, model.rows);
+
+            let dx_dyn = &lin.k * &model.innov;
+            self.apply_state_error(dvec_to_vecn(&dx_dyn));
+
+            let i_kh = DMatrix::<f64>::identity(STATE_DIM, STATE_DIM) - &lin.k * &model.h;
+            let p_new_dyn =
+                &i_kh * &lin.p_dyn * i_kh.transpose() + &lin.k * &lin.r * lin.k.transpose();
+            let mut p_new = MatN::from_column_slice(p_new_dyn.as_slice());
+            enforce_pd(&mut p_new);
+            self.l_cov = chol_lower_with_enforce(p_new, "update_gps_raw");
+
+            self.update_aero_learning(self.state.v, t);
+            self.state.t = t;
+            self.maybe_checkpoint(true);
         }
-        self.last_gnss_accepted = Some((t, true));
 
-        self.apply_gps_raw_active_set(t, model.rows, &lin.dx_raw, &mut lin.k);
-        suppress_pseudorange_velocity(&model.row_kind, model.rows, &mut lin.k);
-        maybe_project_velocity_weak_direction(&mut lin.k, model.info_v, model.rows);
-
-        let dx_dyn = &lin.k * &model.innov;
-        self.apply_state_error(dvec_to_vecn(&dx_dyn));
-
-        let i_kh = DMatrix::<f64>::identity(STATE_DIM, STATE_DIM) - &lin.k * &model.h;
-        let p_new_dyn =
-            &i_kh * &lin.p_dyn * i_kh.transpose() + &lin.k * &lin.r * lin.k.transpose();
-        let mut p_new = MatN::from_column_slice(p_new_dyn.as_slice());
-        enforce_pd(&mut p_new);
-        self.l_cov = chol_lower_with_enforce(p_new, "update_gps_raw");
-
-        self.update_aero_learning(self.state.v, t);
-        self.state.t = t;
-        self.maybe_checkpoint(true);
+        if record {
+            self.history.push_event(Event::GpsRaw(meas));
+        }
+        self.replay_tail(replay_events);
     }
 
     fn maybe_bias_cal_observe_gps_raw(&mut self, t: f64, sats: &[GpsSatMeas]) {
@@ -213,7 +266,13 @@ impl Estimator {
         self.bias_cal_observe_rv(t, sol.pos, sol.vel, &sol.r_cov);
     }
 
-    fn apply_gps_raw_active_set(&self, t: f64, rows: usize, dx_raw: &DVector<f64>, k: &mut DMatrix<f64>) {
+    fn apply_gps_raw_active_set(
+        &self,
+        t: f64,
+        rows: usize,
+        dx_raw: &DVector<f64>,
+        k: &mut DMatrix<f64>,
+    ) {
         let (mut bias_updates_enabled, max_ba_update) = self.bias_update_profile(t);
         if self.bias_cal.enabled {
             bias_updates_enabled = false;
@@ -265,14 +324,11 @@ fn count_rows(sats: &[GpsSatMeas]) -> Option<usize> {
     Some(rows)
 }
 
-fn gps_raw_gate_sq(rows: usize, noise: &crate::types::NoiseParams) -> f64 {
-    if noise.gps_raw_nis_gate.is_finite() && noise.gps_raw_nis_gate > 0.0 {
-        return noise.gps_raw_nis_gate;
-    }
-    chi_square_gate(rows, noise.nis_alpha)
-}
-
-fn suppress_pseudorange_velocity(row_kind: &[u8; GPS_RAW_MAX_ROWS], rows: usize, k: &mut DMatrix<f64>) {
+fn suppress_pseudorange_velocity(
+    row_kind: &[u8; GPS_RAW_MAX_ROWS],
+    rows: usize,
+    k: &mut DMatrix<f64>,
+) {
     for j in 0..rows {
         if row_kind[j] != ROW_PR {
             continue;
@@ -452,7 +508,11 @@ fn wls_velocity(
     Some((v_est, cov_v))
 }
 
-fn wls_nis_and_dof(r_est: Vector3<f64>, v_est: Vector3<f64>, sats: &[GpsSatMeas]) -> Option<(f64, usize)> {
+fn wls_nis_and_dof(
+    r_est: Vector3<f64>,
+    v_est: Vector3<f64>,
+    sats: &[GpsSatMeas],
+) -> Option<(f64, usize)> {
     let mut d2 = 0.0f64;
     let mut n_pr = 0usize;
     let mut n_rr = 0usize;

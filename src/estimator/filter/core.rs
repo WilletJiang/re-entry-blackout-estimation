@@ -1,11 +1,18 @@
-use super::{bias_cal, history::Event, history::HistoryBuffer, history::PropRecord, history::Snapshot, Estimator, EstimatorHealth, MatN};
+use super::{
+    bias_cal, history::Event, history::HistoryBuffer, history::PropRecord, history::Snapshot,
+    Estimator, EstimatorHealth, MatN,
+};
 use crate::data::AeroTable;
 use crate::util::enforce_pd;
 use nalgebra::{Matrix3, Vector3};
 use std::sync::Arc;
 
 impl Estimator {
-    pub fn new(noise: crate::types::NoiseParams, dyn_params: crate::types::DynamicsParams, history_sec: f64) -> Self {
+    pub fn new(
+        noise: crate::types::NoiseParams,
+        dyn_params: crate::types::DynamicsParams,
+        history_sec: f64,
+    ) -> Self {
         let cov0 = bias_cal::initial_cov();
         let l0 = super::math::chol_lower_with_enforce(cov0, "initial_cov");
         let history_snapshot_dt = 0.01;
@@ -35,6 +42,11 @@ impl Estimator {
             last_gnss_post_v: None,
             last_gnss_accepted: None,
             gnss_reject_streak: 0,
+            robust_gate_alpha: None,
+            robust_r_scale_cap: super::robust::DEFAULT_R_SCALE_CAP,
+            robust_student_nu: 0.0,
+            iae_gamma: None,
+            iae_scales: [1.0; super::robust::ROBUST_SENSOR_COUNT],
             aero_learning_enabled: false,
             last_v_meas: None,
             learned_aero_correction: Vector3::zeros(),
@@ -118,7 +130,11 @@ impl Estimator {
             self.seg_has_data = false;
         }
 
-        self.history.push_snapshot(Snapshot { state, l_cov, internal });
+        self.history.push_snapshot(Snapshot {
+            state,
+            l_cov,
+            internal,
+        });
         self.last_snapshot_t = t;
     }
 
@@ -177,11 +193,35 @@ impl Estimator {
         self.aero_torque_rw_blackout = aero_torque_rw;
     }
 
-    pub fn set_robust_tuning(&mut self, _gate_p: f64, _r_scale_cap: f64, _student_nu: f64) {}
+    pub fn set_robust_tuning(&mut self, gate_p: f64, r_scale_cap: f64, student_nu: f64) {
+        self.robust_gate_alpha = Self::sanitize_gate_alpha(gate_p);
+        self.robust_r_scale_cap = if r_scale_cap.is_finite() {
+            r_scale_cap.max(super::robust::DEFAULT_R_SCALE_CAP.min(1.0))
+        } else {
+            super::robust::DEFAULT_R_SCALE_CAP
+        };
+        self.robust_student_nu = if student_nu.is_finite() {
+            student_nu.max(0.0)
+        } else {
+            0.0
+        };
+        self.reset_iae_scales();
+    }
 
-    pub fn enable_iae(&mut self, _gamma: f64) {}
+    pub fn enable_iae(&mut self, gamma: f64) {
+        let gamma = if gamma.is_finite() {
+            gamma.clamp(0.01, 1.0)
+        } else {
+            0.1
+        };
+        self.iae_gamma = Some(gamma);
+        self.reset_iae_scales();
+    }
 
-    pub fn disable_iae(&mut self) {}
+    pub fn disable_iae(&mut self) {
+        self.iae_gamma = None;
+        self.reset_iae_scales();
+    }
 
     pub fn inflate_rv(&mut self, pos_scale: f64, vel_scale: f64) {
         let mut p = self.cov();
@@ -197,7 +237,11 @@ impl Estimator {
         let t = self.state.t;
         self.inflate_rv(pos_scale, vel_scale);
         self.maybe_checkpoint(true);
-        self.history.push_event(Event::InflateRv { t, pos_scale, vel_scale });
+        self.history.push_event(Event::InflateRv {
+            t,
+            pos_scale,
+            vel_scale,
+        });
     }
 
     pub fn enable_aero_learning(&mut self, learning_rate: f64) {
@@ -235,5 +279,4 @@ impl Estimator {
 
         self.last_v_meas = Some((t, v_meas));
     }
-
 }

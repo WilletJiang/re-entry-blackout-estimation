@@ -1,8 +1,8 @@
 use entry_blackout_estimation::{
-    data::{AeroCoeff, AeroTable, load_vehicle_props},
+    data::{load_vehicle_props, AeroCoeff, AeroTable},
     estimator::{Estimator, GnssMeas, RadarMeas, StarMeas},
-    types::{DynamicsParams, NoiseParams, ImuSample},
     physics::isa_atmosphere,
+    types::{DynamicsParams, ImuSample, NoiseParams},
 };
 use nalgebra::{linalg::Cholesky, Matrix3, Matrix6, UnitQuaternion, Vector3};
 

@@ -75,5 +75,9 @@ fn propagate_has_no_heap_allocations_after_warmup() {
         });
     }
     let after = alloc_count();
-    assert_eq!(after, before, "allocations detected: before={} after={}", before, after);
+    assert_eq!(
+        after, before,
+        "allocations detected: before={} after={}",
+        before, after
+    );
 }

@@ -62,7 +62,12 @@ pub(super) fn qr_r_upper_in_place(a: &mut Mat2NByN) -> MatN {
     r
 }
 
-pub(super) fn insert_block(dst: &mut MatN, block: &Matrix3<f64>, row_offset: usize, col_offset: usize) {
+pub(super) fn insert_block(
+    dst: &mut MatN,
+    block: &Matrix3<f64>,
+    row_offset: usize,
+    col_offset: usize,
+) {
     for r in 0..3 {
         for c in 0..3 {
             dst[(row_offset + r, col_offset + c)] = block[(r, c)];

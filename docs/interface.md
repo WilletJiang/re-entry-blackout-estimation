@@ -22,6 +22,8 @@ Typical usage:
 
 - `set_blackout_residual(start, end, ...)`
 - `set_precalibration(enabled, blackout_start)`
+- `set_robust_tuning(gate_p, r_scale_cap, student_nu)`
+- `enable_iae(gamma)` / `disable_iae()`
 - `enable_aero_learning(rate)` / `disable_aero_learning()`
 
 3. Run:
@@ -31,13 +33,15 @@ Typical usage:
 - Star: call `update_star(StarMeas { t, q_bi, r_cov })`
 - Radar: call `update_radar(RadarMeas { t, alt, sigma })`
 
+`torque_cmd` / `force_cmd` are now consumed by the same nominal aero/RCS helper used by truth propagation when an aero table is configured, so truth and filter share the same nominal dynamics composition path.
+
 ### Tight-coupled GNSS
 
 For raw pseudorange + Doppler:
 
 - `update_gps_raw_ref(t, sats)` where each sat provides `{pos_ecef, vel_ecef, pr_m, pr_sigma, range_rate_mps, rr_sigma}`
 
-This path is available in `flight` builds (not diagnostics-gated).
+This path is available in `flight` builds (not diagnostics-gated). Raw GPS measurements now participate in the same fixed-lag rewind/replay event system as GNSS PVT, star, and radar, so delayed / out-of-order raw measurements should still be submitted with their measurement timestamp `t`.
 
 ### Replay-safe “external interventions”
 
@@ -55,4 +59,3 @@ Use `Estimator::health()` to get:
 - last GNSS NIS and accept flag
 - GNSS reject streak
 - history buffer sizes and approximate capacity bytes
-

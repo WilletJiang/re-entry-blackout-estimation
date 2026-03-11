@@ -18,42 +18,52 @@
 
 ---
 
+## Repository Implementation Note
+
+The current repository realizes this task with a **24-state error-state SR-EKF** that augments the nominal $(r,v,q,\omega,b_g,b_a)$ state with aerodynamic residual force / torque states. Delayed sensors are handled by a fixed-lag **rewind--update--replay** history buffer, and raw GPS tight-coupled updates now participate in that same event replay path. Truth propagation and filter-side nominal linearization share the same nominal aero/RCS composition helper so both sides use a consistent deterministic dynamics model.
+
+---
+
 ## State Vector Definition
 
 $$
-x = \big[r,\ v,\ q,\ \omega,\ b_g,\ b_a\big]^\top
+x = \big[r,\ v,\ q,\ \omega,\ b_g,\ b_a,\ f_{\mathrm{res}},\ \tau_{\mathrm{res}}\big]^\top
 $$
 
 * $r\in\mathbb R^3$ position; $v\in\mathbb R^3$ velocity; $q\in\mathbb H$ unit quaternion; $\omega\in\mathbb R^3$ angular velocity;
-* $b_g, b_a$ are gyro/accelerometer biases (random walk).
+* $b_g, b_a$ are gyro/accelerometer biases (random walk);
+* $f_{\mathrm{res}}, \tau_{\mathrm{res}}$ are residual aerodynamic force/torque states used to absorb model mismatch during blackout and reacquisition.
 
 **Continuous-time model:**
 
 $$
 \begin{aligned}
 \dot r &= v \\
-\dot v &= R(q)\big(a_\text{meas}-b_a-n_a\big) + g(r) + a_\text{aero}(r,v) + a_\text{RCS}(t) \\
+\dot v &= R(q)\big(a_\text{meas}-b_a-n_a\big) + g(r) \\
 \dot q &= \tfrac{1}{2}\,\Omega(\omega)\,q \\
-\dot \omega &= J^{-1}\!\left(\tau_\text{meas}-b_g-n_g - \omega\times J\omega + \tau_\text{aero}(r,v) + \tau_\text{RCS}(t)\right) \\
-\dot b_g &= w_g,\quad \dot b_a = w_a
+\dot \omega &= J^{-1}\!\left(\tau_\text{cmd} + \tau_\text{aero}(r,v) + \tau_{\mathrm{res}} - \omega\times J\omega\right) \\
+\dot b_g &= w_g,\quad \dot b_a = w_a \\
+\dot f_{\mathrm{res}} &= -\tau_f^{-1} f_{\mathrm{res}} + w_{f,\mathrm{res}},\quad
+\dot \tau_{\mathrm{res}} = -\tau_\tau^{-1} \tau_{\mathrm{res}} + w_{\tau,\mathrm{res}}
 \end{aligned}
 $$
 
 * $R(q)$: direction cosine matrix (body-to-inertial); $\Omega(\omega)$: quaternion rate matrix;
-* $a_\text{aero}, \tau_\text{aero}$: **unknown/time-varying aerodynamic residuals** (primary source of model mismatch, strongly nonlinear with $M,\,q_\mathrm{dyn}$);
-* $w_g,w_a$: zero-mean Gaussian process noise (random walk).
+* translational state propagation in the repository is IMU strapdown style, while the nominal aerodynamic / RCS composition used by truth propagation and filter-side model linearization comes from the same shared helper;
+* $w_g,w_a,w_{f,\mathrm{res}},w_{\tau,\mathrm{res}}$: zero-mean process noise terms.
 
 **Measurement model:**
 
 $$
 \begin{aligned}
 z_\mathrm{GNSS}(t_k) &= h_\mathrm{GNSS}(x(t_k)) + \nu_g \\
+z_\mathrm{raw}(t_k) &= h_\mathrm{raw}(x(t_k)) + \nu_\mathrm{raw} \\
 z_\star(t_k-\delta t_\star) &= h_\star(x(t_k-\delta t_\star)) + \nu_\star \\
 z_h(t_k-\delta t_h) &= h_h(x(t_k-\delta t_h)) + \nu_h
 \end{aligned}
 $$
 
-* Note: **delayed observations** and **out-of-order arrival** require time calibration and **stochastic cloning / delay compensation** mechanisms.
+* Note: delayed star / radar / raw-GNSS observations are applied with **rewind-to-measurement-time + deterministic replay** inside the fixed-lag history buffer.
 
 ---
 

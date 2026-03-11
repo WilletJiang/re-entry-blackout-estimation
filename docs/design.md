@@ -8,11 +8,11 @@ The estimator is a **24-state error-state SR-EKF**:
 
 - `r (3), v (3), δθ (3), ω (3), bg (3), ba (3), aero_res_force (3), aero_res_torque (3)`
 
-Propagation is strapdown-style using IMU specific force and gyro rate, plus gravity (and optional learned aero correction). Covariance is propagated in **square-root form** (QR) for numerical stability.
+Propagation is strapdown-style using IMU specific force and gyro rate, plus gravity (and optional learned aero correction). The nominal aerodynamic / RCS composition now comes from the same helper on both the truth and filter sides; the filter still uses IMU specific force for state integration so nominal terms are shared without double-counting measured acceleration. Covariance is propagated in **square-root form** (QR) for numerical stability.
 
 ### 2) Process noise (covariance realism)
 
-`process_noise()` in `src/estimator.rs` is designed to be phase-aware:
+`process_noise()` in `src/estimator/support/noise.rs` is phase-aware:
 
 - phase-dependent `q_scale_rv_{pre,blk,post}` and `q_scale_ba_{pre,blk,post}`
 - OU-style aero residual force/torque with optional strengthened blackout values
@@ -20,7 +20,12 @@ Propagation is strapdown-style using IMU specific force and gyro rate, plus grav
 
 ### 3) Measurement updates & robustness
 
-Measurement updates are gated using χ² (NIS) and use Joseph-form covariance updates with an explicit SPD repair (`enforce_pd` + Cholesky/jitter/spectral fallback).
+Measurement updates are gated using χ² (NIS) and use Joseph-form covariance updates with an explicit SPD repair (`enforce_pd` + Cholesky/jitter/spectral fallback). Runtime `RobustTuning` now connects the sweep knobs to live behavior:
+
+- `gate_p` overrides the effective χ² gate level
+- `student_nu` enables Student-t-style covariance inflation
+- `r_scale_cap` bounds covariance inflation
+- `iae_gamma` enables adaptive innovation-based covariance scaling (IAE) with replay-safe internal state
 
 Key choices:
 
@@ -58,6 +63,7 @@ Tight coupling is implemented in `Estimator::update_gps_raw_ref()`:
 - pseudorange rows are robustified (heavy-tail protection)
 - pseudorange is prevented from directly updating `v` (avoids RV cross-cov noise injection)
 - Doppler-only velocity geometry is checked; the weakest direction is projected out when ill-conditioned
+- raw GPS updates are recorded as replay events, so delayed / out-of-order tight-coupled measurements use the same rewind/replay path as GNSS PVT, star, and radar
 
 This is the root fix behind the tight-mode tail failures (velocity “noise injection” under degenerate Doppler geometry).
 
@@ -78,4 +84,3 @@ History is stored as:
 For a 10 s fixed-lag window, this is designed to stay within the `tasks.md` **≤ 20 MB** target.
 
 At runtime, you can inspect the current buffer sizes using `Estimator::health()` (includes `history_capacity_bytes`).
-

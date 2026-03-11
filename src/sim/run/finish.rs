@@ -1,8 +1,8 @@
 use super::{
-    metrics, SimConfig, SimRun, CHI2_3_HI, CHI2_3_LO, CHI2_6_HI, CHI2_6_LO, MonteCarloResult,
+    metrics, MonteCarloResult, SimConfig, SimRun, CHI2_3_HI, CHI2_3_LO, CHI2_6_HI, CHI2_6_LO,
 };
-use crate::sim::BlackoutTrace;
 use crate::estimator::Estimator;
+use crate::sim::BlackoutTrace;
 use nalgebra::{linalg::Cholesky, Matrix3, Matrix6, SVector, Vector3};
 
 pub(super) struct SimFinish {

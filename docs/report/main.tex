@@ -21,10 +21,10 @@
 
 \title{SE-2317 Entry Blackout State Estimation}
 \author{Gao Jiang}
-\date{2025-12-28}
+\date{2026-03-11}
 
 \abstract{
-This report details the design and validation of a Tightly-Coupled Square-Root Error-State Kalman Filter (SR-EKF) for the SE-2317 entry vehicle. The architecture features a fixed-lag history buffer with rewind--update--replay semantics to handle delayed and out-of-order sensor data, alongside a robustness layer employing $\chi^2$ gating and heavy-tailed variance inflation. To mitigate observability loss during the critical GNSS blackout phase, a dedicated pre-blackout accelerometer bias calibration strategy is implemented. Monte Carlo analysis (N=500) demonstrates a \textbf{100.0\% pass rate} and consistent NEES/NIS performance, validating the system's resilience against sensor dropouts, outliers, and prolonged signal denial.
+This report details the design and validation of a tightly-coupled Square-Root Error-State Kalman Filter (SR-EKF) for the SE-2317 entry vehicle. The architecture features a fixed-lag history buffer with rewind--update--replay semantics to handle delayed and out-of-order sensor data, and raw GPS tight-coupled updates now participate in that same replay path. The robustness layer combines configurable $\chi^2$ gating, Student-t-style covariance inflation, and optional innovation-based adaptive estimation (IAE). To mitigate observability loss during the critical GNSS blackout phase, a dedicated pre-blackout accelerometer bias calibration strategy is implemented. The current 2026-03-11 release campaign reproduces a \textbf{100.0\% pass rate} in tight-coupled mode over 500 Monte Carlo runs, while an additional 100-run quick regression remains consistent at \textbf{100/100} tight and \textbf{96/100} PVT.
 }
 
 \begin{document}
@@ -43,7 +43,7 @@ This report details the design and validation of a Tightly-Coupled Square-Root E
   \toprule
   \textbf{Rev} & \textbf{Date} & \textbf{Author} & \textbf{Change Summary} \\
   \midrule
-  A & 2025-12-28 & Gao Jiang & Initial release with Monte Carlo evidence and traceability. \\
+  A & 2026-03-11 & Gao Jiang & Documentation synchronized to the current estimator implementation and validation flow. \\
   \bottomrule
 \end{tabular}
 
@@ -54,15 +54,16 @@ This report details the design and validation of a Tightly-Coupled Square-Root E
 \begin{itemize}
   \item \textbf{Estimator.} A \emph{square-root} error-state EKF (SR-EKF) on a 24D augmented state:
   $(r,v,q,\omega,b_g,b_a,f_{\text{res}},\tau_{\text{res}})$, with multiplicative quaternion error injection.
-  \item \textbf{Delayed / out-of-order sensors.} A \emph{fixed-lag history buffer} with \emph{rewind--update--replay} semantics.
+  \item \textbf{Delayed / out-of-order sensors.} A \emph{fixed-lag history buffer} with \emph{rewind--update--replay} semantics covering GNSS PVT, raw GPS, star tracker, and radar.
   For linear-Gaussian models this is equivalent to stochastic cloning/factor-graph smoothing on a fixed window; for EKF it is first-order equivalent and empirically stable.
-  \item \textbf{Robustness.} Innovation gating via $\chi^2$ tests (NIS), plus a tight-coupling pseudorange down-weighting rule equivalent to an $M$-estimator (Huber-like) implemented as variance inflation.
+  \item \textbf{Robustness.} Innovation gating via $\chi^2$ tests (NIS), Student-t-style covariance inflation, replay-safe IAE scaling, and raw-GPS pseudorange down-weighting for heavy tails.
   \item \textbf{Covariance realism.} Phase-dependent process-noise inflation and blackout-specific aerodynamic residual excitation to prevent overconfidence where model error dominates.
+  \item \textbf{Nominal dynamics symmetry.} Truth propagation and filter-side nominal linearization call the same aerodynamic/RCS composition helper; the filter still integrates de-biased IMU specific force directly to avoid double-counting measured acceleration.
   \item \textbf{Bias strategy.} A dedicated pre-blackout accelerometer-bias calibration stage (batch normal equations accumulated online) applied at blackout entry to mitigate loss of bias observability during blackout.
-  \item \textbf{Monte Carlo evidence (500 runs).}
+  \item \textbf{Monte Carlo evidence.}
   \begin{itemize}
-    \item \textbf{Tight-coupled GNSS:} pass rate \textbf{100.0\%} (500/500) under 5\% heavy-tail outliers and 20\% dropout; mean NEES $\approx 4.89$ with $\approx 0.948$ coverage.
-    \item \textbf{PVT baseline:} pass rate \textbf{97.0\%} (485/500); rare catastrophic inconsistency events dominate mean NEES.
+    \item \textbf{Current 500-run release campaign:} tight-coupled GNSS pass rate \textbf{100.0\%} (500/500) under 5\% heavy-tail outliers and 20\% dropout; PVT baseline \textbf{97.0\%} (485/500).
+    \item \textbf{Current release quick regression (2026-03-11, 100 runs):} tight-coupled GNSS \textbf{100.0\%} (100/100), PVT baseline \textbf{96.0\%} (96/100).
   \end{itemize}
 \end{itemize}
 
@@ -112,6 +113,7 @@ The translational update is second-order in $\Delta t$:
   r_{k+1} &= r_k + v_k \Delta t + \tfrac{1}{2}\left( C(q_k)\,a_k + g(r_k) + a_{\text{learn}}(k)\right)\Delta t^2.
 \end{align}
 Here $a_{\text{learn}}$ is an optional bounded online correction (see \S\ref{sec:robustness-consistency}).
+The nominal aerodynamic / RCS composition used by the filter Jacobian is generated by the same helper as truth propagation; the state update itself still uses de-biased IMU specific force so nominal terms are shared without double-counting the measured acceleration.
 
 \subsection{Process noise: IMU, bias RW, and aero residual OU}
 We model gyro/accel measurement noise as white with spectral densities
@@ -308,6 +310,16 @@ with constants $k=4$ and cap $c=100$.
 This is equivalent to an $M$-estimator with a Huber-like influence function:
 large residuals receive reduced weight without forcing hard rejection.
 
+\subsection{Runtime robust tuning}
+The repository also exposes a runtime robustness surface used by the sweep harness:
+\begin{itemize}
+  \item \texttt{gate\_p} adjusts the effective $\chi^2$ gate level;
+  \item \texttt{student\_nu} enables Student-t-style covariance inflation;
+  \item \texttt{r\_scale\_cap} bounds covariance inflation;
+  \item \texttt{iae\_gamma} enables replay-safe innovation-based adaptive estimation (IAE).
+\end{itemize}
+The adaptive state is stored inside the fixed-lag snapshots so rewind/replay remains deterministic.
+
 \subsection[Consistency enforcement: phase-dependent Q]{Consistency enforcement: phase-dependent $Q$ and covariance inflation}
 Two mechanisms address non-stationary model errors inherent to entry dynamics:
 \begin{enumerate}
@@ -379,9 +391,9 @@ The harness simulates:
   \item \textbf{GNSS blackout:} no GNSS in $[120,160]\,\si{s}$.
   \item \textbf{Dropout:} independent Bernoulli dropout with $p=0.20$ on applicable sensors.
   \item \textbf{Outliers:} 5\% heavy-tail injection (Cauchy) on GNSS position/pseudorange and radar altitude.
-  \item \textbf{Delay/out-of-order:} star tracker timestamp $t-\SI{0.12}{s}$ and radar timestamp $t-\SI{0.07}{s}$.
+  \item \textbf{Delay/out-of-order:} star tracker timestamp $t-\SI{0.12}{s}$ and radar timestamp $t-\SI{0.07}{s}$; raw GPS updates are also replay-safe if delivered late.
   \item \textbf{Bias jump (fault mode):} step change in truth IMU bias (gyro + accel) at $t=\SI{140}{s}$ with random direction; enabled via \texttt{BIAS\_JUMP=1}.
-  \item \textbf{RCS pulses:} deterministic pulse train from the provided actuator series (truth model).
+  \item \textbf{RCS pulses:} deterministic pulse train from the provided actuator series, composed through the same nominal dynamics helper on the truth and filter sides.
 \end{itemize}
 
 \subsection{Metrics}
@@ -390,7 +402,19 @@ RMS position, velocity, attitude error, and bias RMS (converted to \si{\micro g}
 We report per-run NEES/NIS means and their 95\% coverage rates, plus phase-split NEES/NIS (pre/blackout/post/tail)
 to localize inconsistency to specific mission regimes.
 
-\subsection{Monte Carlo summary (500 runs)}
+\subsection{Current quick regression (2026-03-11, 100 runs)}
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+Mode & Pass rate & Mean NEES & Mean NIS \\
+\midrule
+PVT baseline  & 96.0\%  & 18.54 & 5.25 \\
+Tight-coupled & 100.0\% & 4.66 & 10.42 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Current Monte Carlo summary (500 runs)}
 \begin{center}
 \begin{tabular}{lrrrr}
 \toprule
@@ -445,7 +469,7 @@ indicating occasional severe model mismatch or update corruption; these are supp
   \begin{subfigure}[t]{0.49\linewidth}
     \centering
     \includegraphics[width=\linewidth]{mc_blackout_envelope_tight.pdf}
-    \caption{Position error envelope vs mean 3$\sigma$ (500 runs).}
+    \caption{Position error envelope vs mean 3$\sigma$ (500-run batch).}
   \end{subfigure}
   \hfill
   \begin{subfigure}[t]{0.49\linewidth}

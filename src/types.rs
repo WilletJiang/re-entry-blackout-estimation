@@ -89,9 +89,9 @@ impl Default for NoiseParams {
             aero_torque_rw: 160.0,
             aero_force_rw_blackout: None,
             aero_torque_rw_blackout: None,
-            nis_alpha: 0.001,                 // 99.9% gate by default
-            star_nis_gate_sq: 100.0,          // ~10σ on attitude angle-axis
-            gps_raw_nis_gate: 0.0,            // <=0 means "use chi-square gate(rows, nis_alpha)"
+            nis_alpha: 0.001,                      // 99.9% gate by default
+            star_nis_gate_sq: 100.0,               // ~10σ on attitude angle-axis
+            gps_raw_nis_gate: 0.0, // <=0 means "use chi-square gate(rows, nis_alpha)"
             gps_raw_max_ba_update: 5e-6 * 9.80665, // 5 µg in SI units
             gps_ba_update_gain: 1.0,
             aero_learning_max_correction: 0.5, // cap aero learning at 0.5 m/s²
@@ -105,10 +105,10 @@ impl NoiseParams {
         // Bias is nearly constant over the short mission window; keep RW small so
         // GNSS can actually converge it instead of it random-walking away.
         n.accel_bias_rw = 5e-6_f64 * 9.80665; // 5 µg/√Hz in SI units
-        // Keep translational process noise in-family with the IMU spec so that
-        // GNSS velocity can actually calibrate accelerometer bias (otherwise Q dominates).
+                                              // Keep translational process noise in-family with the IMU spec so that
+                                              // GNSS velocity can actually calibrate accelerometer bias (otherwise Q dominates).
         n.accel_residual = 0.003; // m/s²/√Hz (~300 µg)
-        // Phase-dependent inflation: modest before/after blackout, stronger in blackout.
+                                  // Phase-dependent inflation: modest before/after blackout, stronger in blackout.
         n.q_scale_rv_pre = 1.0;
         n.q_scale_rv_blk = 10.0;
         n.q_scale_rv_post = 2.0;
@@ -147,7 +147,7 @@ pub struct State {
     pub omega: Vector3<f64>,
     pub bg: Vector3<f64>,
     pub ba: Vector3<f64>,
-    pub aero_res_force: Vector3<f64>,  // body-frame residual force [N]
+    pub aero_res_force: Vector3<f64>, // body-frame residual force [N]
     pub aero_res_torque: Vector3<f64>, // body-frame residual torque [Nm]
 }
 

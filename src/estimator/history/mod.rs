@@ -1,4 +1,4 @@
-use super::{bias_cal::BiasCal, GnssMeas, MatN, RadarMeas, StarMeas};
+use super::{bias_cal::BiasCal, GnssMeas, GpsRawMeas, MatN, RadarMeas, StarMeas};
 use crate::types::ImuSample;
 use std::collections::VecDeque;
 
@@ -24,6 +24,11 @@ pub(super) struct LoggedImu {
 pub(super) struct SnapshotInternal {
     pub bias_cal: BiasCal,
     pub gnss_reject_streak: u32,
+    pub robust_gate_alpha: Option<f64>,
+    pub robust_r_scale_cap: f64,
+    pub robust_student_nu: f64,
+    pub iae_gamma: Option<f64>,
+    pub iae_scales: [f64; super::robust::ROBUST_SENSOR_COUNT],
     pub aero_learning_enabled: bool,
     pub aero_learning_rate: f64,
     pub last_v_meas: Option<(f64, nalgebra::Vector3<f64>)>,
@@ -34,10 +39,17 @@ pub(super) struct SnapshotInternal {
 pub(super) enum Event {
     Imu(LoggedImu),
     Gnss(GnssMeas),
+    GpsRaw(GpsRawMeas),
     Star(StarMeas),
     Radar(RadarMeas),
-    InflateRv { t: f64, pos_scale: f64, vel_scale: f64 },
-    BiasCalApply { t: f64 },
+    InflateRv {
+        t: f64,
+        pos_scale: f64,
+        vel_scale: f64,
+    },
+    BiasCalApply {
+        t: f64,
+    },
 }
 
 impl Event {
@@ -45,6 +57,7 @@ impl Event {
         match self {
             Event::Imu(l) => l.sample.t,
             Event::Gnss(m) => m.t,
+            Event::GpsRaw(m) => m.t,
             Event::Star(m) => m.t,
             Event::Radar(m) => m.t,
             Event::InflateRv { t, .. } => *t,
@@ -105,10 +118,20 @@ impl HistoryBuffer {
             return;
         };
         let cutoff = newest.state.t - self.horizon;
-        while self.snapshots.front().map(|s| s.state.t < cutoff).unwrap_or(false) {
+        while self
+            .snapshots
+            .front()
+            .map(|s| s.state.t < cutoff)
+            .unwrap_or(false)
+        {
             self.snapshots.pop_front();
         }
-        while self.events.front().map(|e| e.time() < cutoff).unwrap_or(false) {
+        while self
+            .events
+            .front()
+            .map(|e| e.time() < cutoff)
+            .unwrap_or(false)
+        {
             self.events.pop_front();
         }
         while self.props.len() + 1 > self.snapshots.len() && !self.props.is_empty() {

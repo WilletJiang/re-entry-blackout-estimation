@@ -54,4 +54,3 @@ pub(super) fn init_est_state(
     );
     est.state.omega = truth.omega;
 }
-

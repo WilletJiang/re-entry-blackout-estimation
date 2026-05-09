@@ -1,284 +1,66 @@
-<div align="center">
-  <h1>Entry Blackout Estimation</h1>
-  <p><strong>Production-grade multi-sensor fusion for spacecraft re-entry navigation through plasma blackout</strong></p>
+# Entry Blackout Estimation
 
-  <p>
-    <a href="https://www.rust-lang.org/"><img alt="Rust" src="https://img.shields.io/badge/Rust-1.70+-orange?logo=rust&logoColor=white"></a>
-    <a href="#"><img alt="License" src="https://img.shields.io/badge/License-MIT-blue.svg"></a>
-    <a href="#"><img alt="Monte Carlo" src="https://img.shields.io/badge/Monte%20Carlo-100%25%20Pass-brightgreen"></a>
-  </p>
-
-  <p>
-    <a href="README_CN.md">中文文档</a>
-  </p>
-</div>
-<p align="center">
-  <a href="#1-installation">Installation</a> •
-  <a href="#2-quick-start">Quick Start</a> •
-  <a href="#3-core-concepts">Core Concepts</a> •
-  <a href="#4-architecture">Architecture</a> •
-  <a href="#5-data--evaluation">Data</a> •
-  <a href="#6-extensibility">Extensibility</a> •
-  <a href="#7-development">Development</a> •
-  <a href="#8-code-structure">Code Structure</a> •
-  <a href="#9-references">References</a>
-</p>
-
----
+Chinese documentation: [README_CN.md](README_CN.md)
 
 ## Overview
 
-When a spacecraft re-enters Earth's atmosphere, the extreme heat generates a **plasma sheath** that completely blocks GNSS signals for ~40 seconds. During this **blackout window**, navigation relies solely on IMU dead-reckoning, which drifts rapidly. The estimator must restore accurate state estimates within a **tight 2-second window** after blackout ends—or risk losing control.
+This repository addresses the state estimation problem defined by task `SE 2317` for a reusable orbital stage during atmospheric entry. The task is defined by quantitative and operational criteria. During plasma blackout, GNSS becomes unavailable for forty seconds, inertial drift grows under thermal stress, and the vehicle must recover a controllable navigation solution within two seconds after signal reacquisition. Success depends on nominal accuracy, delay handling, observability management, covariance credibility, and bounded runtime.
 
-**Application scenarios:**
-- Reusable launch vehicles (booster recovery)
-- Crewed capsule return (Crew Dragon, Shenzhou)
-- Planetary sample return missions (Mars/Moon)
+The repository is a constrained estimator study with explicit dynamics, sensor timing, anomaly assumptions, and acceptance criteria. The vehicle follows six degree of freedom rigid body dynamics with aerodynamic control and RCS actuation across a strongly nonlinear entry regime from Mach two to Mach twelve. The IMU runs at four hundred hertz. GNSS runs at ten hertz and is fully unavailable from `t0 + 120 s` to `t0 + 160 s`. The star tracker runs at two hertz, arrives with a fixed delay of one hundred and twenty milliseconds, and is unavailable from `t0 + 130 s` to `t0 + 150 s`. The radar altimeter runs at twenty hertz, is delayed by seventy milliseconds, and is valid only below twenty five kilometres. Measurements may drop out, may contain heavy tailed outliers, and may arrive out of order.
 
-```mermaid
-gantt
-    title Re-entry Mission Timeline
-    dateFormat s
-    axisFormat %S s
-    section Sensors
-    GNSS Available     :done, gnss1, 0, 120
-    GNSS Blackout      :crit, blackout, 120, 160
-    GNSS Recovery      :done, gnss2, 160, 180
-    section Estimation
-    Normal Fusion      :done, fuse1, 0, 120
-    IMU Dead-Reckoning :crit, imu, 120, 160
-    2s Recovery Window :milestone, recovery, 162, 0
-```
+## Estimator Design
 
-**Key challenges:**
-- **Asynchronous multi-rate sensors**: IMU (400 Hz), GNSS (10 Hz), star tracker (2 Hz), radar altimeter (20 Hz)
-- **Delayed/out-of-order measurements**: star tracker and radar have fixed latencies
-- **Observation degeneracy**: no GNSS during blackout; partial observability only
-- **Non-ideal measurements**: dropouts, outliers, geometric degeneracy
-- **Statistical consistency**: filter must satisfy NEES/NIS bounds, not just accuracy
+The current implementation uses a 24 state error state square root EKF. The state carries position, velocity, attitude, angular rate, gyroscope bias, accelerometer bias, and residual aerodynamic force and torque terms. Covariance propagation remains in square root form through QR based updates so that numerical conditioning stays controlled during long blackout propagation and during aggressive measurement reacquisition. Translational propagation is strapdown IMU based. Truth propagation and filter side nominal linearization call the same nominal aerodynamic and RCS composition helper, which keeps the deterministic part of the dynamics aligned across simulation and estimation.
 
-**This repository implements:**
-- **Square-root error-state EKF** for numerical stability and proper quaternion handling
-- **Fixed-lag RTS smoothing** to improve blackout-phase estimates using post-blackout information
-- **Rewind-replay time alignment** for delayed measurements
-- **Replay-safe tight coupling**: raw pseudorange + Doppler updates participate in the same fixed-lag event replay path
-- **Shared nominal dynamics**: truth and filter both call the same aerodynamic/RCS composition helper
-- **Tight coupling** (optional): fuse raw pseudorange + Doppler for improved velocity capture
-- **Robust gating and adaptive covariance scaling** with configurable chi-square gates, Student-t inflation, and optional IAE
+Delay handling is a first class requirement in this implementation. Delayed or out of order measurements are applied through a fixed lag history buffer that performs rewind, update, and deterministic replay at the measurement timestamp. This mechanism is used for GNSS PVT, raw GNSS, star tracker, and radar updates. The result is a time aligned state and covariance history even when the arrival sequence differs from the physical sequence. For the blackout interval itself, the repository also includes fixed lag RTS smoothing so that information recovered after signal return can improve the estimate over the trailing segment of the unobservable window.
 
-## Current 500-run Benchmark
+The GNSS update path supports two observation models. The baseline mode uses position and velocity fixes. The tighter mode uses pseudorange and Doppler directly. In that tighter mode the code explicitly checks Doppler geometry degeneracy and removes the weakest velocity direction when the observation geometry becomes ill conditioned. This choice prevents noise injection during reacquisition. Robustness is further shaped by chi square gating, Student t style covariance inflation, optional innovation adaptive estimation, and a dedicated pre blackout accelerometer bias calibration path.
 
-| Mode | Monte Carlo (500 runs) | Pass Rate |
-|------|------------------------|-----------|
-| Tight | `TIGHT=1 harness 500` | **100.0%** (500/500) |
-| PVT | `harness 500` | **97.0%** (485/500) |
+## Acceptance and Verification
 
-Additional release-build quick regression on 2026-03-11 (`harness 100`):
+The acceptance logic follows the mission window defined in `tasks.md`. Accuracy is evaluated only in the two second recovery interval immediately after blackout exit. The thresholds are forty metres for position at three sigma, zero point five metres per second for velocity at three sigma, zero point fifteen degrees for attitude at three sigma, zero point zero zero five degrees per second for gyroscope bias at three sigma, and one hundred and twenty micro g for accelerometer bias at three sigma. Accuracy alone is not sufficient. The repository also tracks NEES and NIS so that statistical consistency is assessed together with recovery performance.
 
-- Tight: **100.0%** (100/100)
-- PVT: **96.0%** (96/100)
+The current verification record is the one documented on March 11, 2026 in `verification.md`. In release mode, the 500 run Monte Carlo campaign passes all 500 runs in tight mode and 485 of 500 runs in PVT mode. An additional 100 run regression on the same date passes 100 of 100 runs in tight mode and 96 of 100 runs in PVT mode. The remaining PVT misses are dominated by accelerometer bias tail behaviour and occasional NEES excursions, which is consistent with the lower information content of position and velocity only updates during the recovery segment.
 
-Full mission specification and acceptance criteria: see [`tasks.md`](tasks.md).
-For the current codebase validation flow and fresh rerun commands, see [`docs/verification.md`](docs/verification.md).
+## Build and Reproduction
 
-
-
----
-
-## 1. Installation
-
-Prerequisites:
-
-- Rust (stable) + Cargo
-
-Build (diagnostics-enabled by default):
+The repository targets stable Rust. A standard release build is sufficient for the benchmark harness and the diagnostics workflow.
 
 ```bash
 cargo build --release
 ```
 
-Feature flags:
+The default feature set includes simulation and diagnostics. A lean flight style build is available when only the core library is required.
 
-- `default = ["diagnostics"]` enables sim + plotting tools.
-- `--no-default-features --features flight` builds a minimal library without sim/plot code.
-- Tight coupling (`update_gps_raw{,_ref}`) is part of the **core estimator** and is available in `flight` builds.
+```bash
+cargo test --no-default-features --features flight
+```
 
----
-
-## 2. Quick Start
-
-### Run the Monte Carlo harness
-
-PVT mode (default):
+The main benchmark entry point is the Monte Carlo harness. Running without environment switches uses the PVT path. Setting `TIGHT=1` enables raw pseudorange and Doppler updates.
 
 ```bash
 cargo run --release --bin harness -- 500
-```
-
-Tight-coupled GNSS (raw pseudorange + Doppler):
-
-```bash
 TIGHT=1 cargo run --release --bin harness -- 500
 ```
 
-The harness writes under `output/` by default:
-
-- `mc_summary_{pvt|tight}.csv` (per-run metrics + pass flag)
-- `mc_nees_blocks_{pvt|tight}.csv` (NEES by state block)
-- `mc_nees_phase_{pvt|tight}.csv` (NEES/NIS by phase: pre/blackout/post/tail)
-- `mc_post_window_{pvt|tight}.csv` (post-blackout GNSS stats)
-- `mc_*.svg` plots for histograms and coverage curves
-
-### Reproduce a single seed
+Single seed reproduction is provided for failure analysis and regression tracking.
 
 ```bash
 cargo run --release --bin repro -- 231
 TIGHT=1 cargo run --release --bin repro -- 231
 ```
 
-Debug traces (only when needed):
+When diagnosis is necessary, trace modes can be enabled for chronological inspection of propagation and measurement handling.
 
 ```bash
 TRACE=1 cargo run --release --bin repro -- 206
 TRACE_GNSS=1 TIGHT=1 cargo run --release --bin repro -- 231
 ```
 
----
+The harness writes summary csv files, phasewise consistency diagnostics, blockwise consistency diagnostics, post blackout window statistics, and svg figures into the configured output directory.
 
-## 3. Core Concepts
+## Repository Layout
 
-### The mission window
+The estimator implementation is organised under `src` with separate subtrees for propagation, measurement updates, history management, calibration, robustness support, and smoothing. The simulation and evaluation code is also under `src` and contains truth generation, sensor synthesis, Monte Carlo execution, and metric aggregation. `physics.rs` contains the shared nominal dynamics helper. `data.rs` loads the vehicle property, aerodynamic coefficient, and RCS preview tables from `data`. `types.rs` defines the public state and noise structures. `plot.rs` emits csv and svg artifacts when diagnostics are enabled.
 
-The evaluator computes RMS errors **only** in the post-blackout recovery window:
-
-- `t ∈ [blackout_end, blackout_end + 2 s]` (default: `[160 s, 162 s]`)
-
-Passing criteria (see `tasks.md` for full wording; code uses 1σ equivalents):
-
-- `rms_pos <= 40/3 m`
-- `rms_vel <= 0.5/3 m/s`
-- `rms_att <= 0.05 deg`
-- `gyro bias RMS <= 0.005 deg/s`
-- `accel bias RMS <= 120 µg`
-
-### NEES vs NIS
-
-- **NIS** checks the measurement side (innovation vs `R`).
-- **NEES** checks global consistency (state error vs `P`).
-
-This repo reports both overall and decomposed views:
-
-- by **state block** (`r`, `v`, `ba`)
-- by **phase** (pre / blackout / post / tail)
-
-### Time alignment (delays / out-of-order)
-
-Star tracker and radar measurements are **delayed** in the task spec. This repo handles delayed / out-of-order measurements via **rewind-to-measurement-time + deterministic replay** over a fixed horizon buffer:
-
-- restore the closest snapshot **≤ t_meas**,
-- replay logged IMU/measurement events up to `t_meas`,
-- apply the update at `t_meas`,
-- replay the remaining events back to “now”.
-
-This keeps state/covariance updates time-consistent (no “approximate innovation at current time” hacks). The same event log now records raw GPS updates as well, so tight-coupled GNSS can be replayed deterministically when it arrives out of order.
-
-### Tight vs PVT
-
-- **PVT**: update directly with `pos/vel` measurements.
-- **Tight**: update with raw **pseudorange + Doppler**, which:
-  - improves velocity capture in the post-blackout window,
-  - provides stronger bias observability when geometry is favorable,
-  - requires explicit handling of Doppler **geometry degeneracy** to avoid injecting noise in weak directions.
-
----
-
-## 4. Architecture
-
-Core modules live in `src/`:
-
-| Module | Purpose |
-| --- | --- |
-| `src/estimator/` | SR-EKF time update (QR), measurement updates (GNSS/Star/Radar/raw GPS), **rewind/replay time alignment**, replay-safe history buffer, bias pre-calibration, adaptive robustness, RTS smoothing |
-| `src/sim/` | Truth + sensor simulation, dropout/outlier injection, blackout phases, Monte Carlo metrics and pass criteria |
-| `src/physics.rs` | Shared nominal aerodynamic/RCS dynamics helper used by both truth propagation and filter-side model linearization |
-| `src/data.rs` | Loads vehicle properties / aero tables / RCS series from `data/` |
-| `src/plot.rs` | Writes CSVs and SVG plots for harness outputs |
-| `src/types.rs` | State, noise, and parameter definitions (`NoiseParams`, `STATE_DIM`, etc.) |
-| `src/util.rs` | Small numeric utilities (SPD enforcement, helpers) |
-
-CLI entry points:
-
-- `src/bin/harness.rs`: Monte Carlo harness + plots/CSVs
-- `src/bin/repro.rs`: single-seed reproduction
-- `src/bin/sweep.rs`: parameter sweeps (offline tuning)
-- `src/bin/microbench.rs`: hot-path microbenchmarks
-
-Design + interface notes:
-
-- `docs/design.md`
-- `docs/interface.md`
-- `docs/verification.md`
-
----
-
-## 5. Data & Evaluation
-
-Input data (CSV) lives in `data/` and is loaded at runtime:
-
-- `data/Vehicle Properties Preview.csv`
-- `data/Aero Coeff Table.csv`
-- `data/RCS Torque Series 100Hz Preview.csv`
-
-Outputs are regenerated on each harness run (see section 2).
-
----
-
-## 6. Extensibility
-
-Typical extensions:
-
-- Add a new sensor: implement an update in `src/estimator/` and inject events in `src/sim/`.
-- Add/retune process noise: extend `NoiseParams` in `src/types.rs` and wire into `process_noise()`.
-- Swap tight coupling models: edit `update_gps_raw_ref()` measurement model / gating / robustification.
-- Build “on-board style” library: `--no-default-features --features flight` (no sim/plot bins).
-
----
-
-## 7. Development
-
-Run tests:
-
-```bash
-cargo test
-```
-
-Optional (recommended) checks:
-
-```bash
-cargo fmt
-cargo clippy --all-targets -- -D warnings
-```
-
----
-
-## 8. Code Structure
-
-```text
-src/
-  estimator/       # SR-EKF, measurement updates, RTS smoothing, time alignment
-  sim/             # Truth simulation, Monte Carlo harness, metrics
-  bin/             # CLI tools: harness, repro, sweep, microbench
-  types.rs         # State, NoiseParams, DynamicsParams
-  physics.rs       # Aero force/torque model
-  data.rs          # Vehicle/aero data loaders
-data/              # CSV input files
-docs/              # design.md, interface.md, verification.md
-```
-
----
-
-## 9. References
-
-- `tasks.md` — SE-2317 mission statement, targets, and evaluation criteria.
-- Groves, *Principles of GNSS, Inertial, and Multisensor Integrated Navigation Systems*.
-- Standard EKF consistency diagnostics: NEES/NIS (χ² coverage, phase/block decomposition).
+Three supplementary texts support the repository. `design.md` explains the estimator decisions and numerical safeguards. `interface.md` specifies timestamp conventions and flight style calling patterns. `verification.md` records the reproducible validation procedure and the current benchmark status. The typeset technical report in the report subdirectory under `docs` provides the longer mathematical and experimental narrative.

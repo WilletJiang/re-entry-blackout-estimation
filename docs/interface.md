@@ -1,61 +1,77 @@
-## Interface Notes (Flight-style usage)
+# Interface Specification
 
-### Timestamp contract
+This note defines the flight style integration contract for the estimator. It complements `tasks.md` and `design.md` by focusing on call semantics, timestamp discipline, and the small set of rules that must be respected if rewind and replay are to remain valid.
 
-All measurements must carry their **measurement timestamp** `t` (seconds), not “arrival time”.
+## Timestamp Discipline
 
-If a sensor is delayed by a fixed amount (e.g. star tracker 120 ms), the correct call is:
+Every measurement passed to the estimator shall carry the physical measurement time `t` in seconds. Arrival time shall not replace it. If a star tracker sample reaches the estimator one hundred and twenty milliseconds after exposure, the caller shall submit `meas.t = t_now - 0.12`. Submitting `meas.t = t_now` would be incorrect. The same rule applies to radar and any delayed raw GNSS packet. The estimator will rewind within its history horizon and apply the update at `meas.t`.
 
-- `meas.t = t_now - delay`
+## Construction and Configuration
 
-The estimator will **rewind/replay** within its history horizon to apply the update at `meas.t`.
+An estimator instance is created with the standard constructor shown below.
 
-### Main loop
+```rust
+let mut est = Estimator::new(noise, dyn_params, history_sec);
+```
 
-Typical usage:
+`history_sec` sets the fixed lag horizon and should be chosen long enough to cover the maximum expected delay together with the smoothing window. Optional runtime configuration is then applied through the existing setter methods. The most relevant controls are `set_blackout_residual`, `set_precalibration`, `set_robust_tuning`, `enable_iae`, `disable_iae`, `enable_aero_learning`, and `disable_aero_learning`. These calls modify estimator behaviour prospectively. They do not retroactively alter the already recorded history.
 
-1. Construct:
+## Main Loop Contract
 
-- `Estimator::new(noise, dyn_params, history_sec)`
+The estimator is driven by a chronological IMU propagation loop. Each IMU sample should be submitted at the IMU rate through `propagate(ImuSample { ... })`. Measurement updates may then be injected whenever data become available, including delayed arrivals, provided that each payload carries the correct measurement timestamp. A minimal integration pattern is shown below.
 
-2. Configure (optional):
+```rust
+let mut est = Estimator::new(noise, dyn_params, history_sec);
 
-- `set_blackout_residual(start, end, ...)`
-- `set_precalibration(enabled, blackout_start)`
-- `set_robust_tuning(gate_p, r_scale_cap, student_nu)`
-- `enable_iae(gamma)` / `disable_iae()`
-- `enable_aero_learning(rate)` / `disable_aero_learning()`
+est.set_precalibration(true, blackout_start);
+est.set_robust_tuning(gate_p, r_scale_cap, student_nu);
 
-3. Run:
+for imu in imu_stream {
+    est.propagate(imu);
 
-- IMU: call `propagate(ImuSample { t, dt, accel_meas, gyro_meas, torque_cmd, force_cmd })` at IMU rate
-- GNSS PVT: call `update_gnss(GnssMeas { t, pos, vel, r_cov })`
-- Star: call `update_star(StarMeas { t, q_bi, r_cov })`
-- Radar: call `update_radar(RadarMeas { t, alt, sigma })`
+    if let Some(gnss) = maybe_gnss() {
+        est.update_gnss(gnss);
+    }
+    if let Some(star) = maybe_star() {
+        est.update_star(star);
+    }
+    if let Some(radar) = maybe_radar() {
+        est.update_radar(radar);
+    }
+}
+```
 
-`torque_cmd` / `force_cmd` are now consumed by the same nominal aero/RCS helper used by truth propagation when an aero table is configured, so truth and filter share the same nominal dynamics composition path.
+When an aerodynamic table is configured, `torque_cmd` and `force_cmd` are consumed by the same nominal aero and RCS composition path used by truth propagation. This keeps the nominal dynamics seen by simulation and estimation consistent.
 
-### Tight-coupled GNSS
+## Measurement Submission Contract
 
-For raw pseudorange + Doppler:
+The supported primary calls are `update_gnss`, `update_star`, `update_radar`, and `update_gps_raw_ref`. `update_gnss` expects a `GnssMeas` carrying timestamp, position, velocity, and covariance. `update_star` expects a `StarMeas` carrying timestamp, body to inertial quaternion, and covariance. `update_radar` expects a `RadarMeas` carrying timestamp, altitude, and standard deviation. These calls are replay aware and may be issued with delayed timestamps as long as the referenced time remains inside the history horizon.
 
-- `update_gps_raw_ref(t, sats)` where each sat provides `{pos_ecef, vel_ecef, pr_m, pr_sigma, range_rate_mps, rr_sigma}`
+## Tight Coupled Raw GNSS Contract
 
-This path is available in `flight` builds (not diagnostics-gated). Raw GPS measurements now participate in the same fixed-lag rewind/replay event system as GNSS PVT, star, and radar, so delayed / out-of-order raw measurements should still be submitted with their measurement timestamp `t`.
+The raw GNSS path is exposed through `update_gps_raw_ref(t, sats)`. Each satellite element shall provide ECEF position, ECEF velocity, pseudorange, pseudorange standard deviation, range rate, and range rate standard deviation. A typical call shape is shown below.
 
-### Replay-safe “external interventions”
+```rust
+est.update_gps_raw_ref(t, &[
+    GpsSatMeas {
+        pos_ecef,
+        vel_ecef,
+        pr_m,
+        pr_sigma,
+        range_rate_mps,
+        rr_sigma,
+    },
+]);
+```
 
-If an external supervisor needs to change estimator state/covariance in a way that must survive rewind/replay, use:
+This interface is part of the core estimator and is available in `flight` builds as well as diagnostics builds. Raw packets follow the same rewind and replay semantics as GNSS PVT, star tracker, and radar. A delayed raw packet shall be submitted with its original measurement timestamp.
 
-- `inflate_rv_record(pos_scale, vel_scale)` instead of `inflate_rv(...)`
-- `apply_bias_calibration_record()` instead of `apply_bias_calibration()`
+## Replay Safe External Interventions
 
-These are recorded as events and checkpointed so deterministic replay remains valid.
+Some supervisory actions change state or covariance in ways that must survive history rewind. These actions shall use replay safe interfaces. Use `inflate_rv_record` instead of `inflate_rv`, and use `apply_bias_calibration_record` instead of `apply_bias_calibration`. The replay safe forms both mutate the live state and record an event so that deterministic replay reconstructs the same result after a rewind. Calling the non recorded forms from an external supervisor creates a hidden divergence between the visible current state and the recoverable history state.
 
-### Health / counters
+## Health Reporting
 
-Use `Estimator::health()` to get:
+`Estimator::health()` exposes the most useful operational counters. It reports the last GNSS NIS value and accept decision, the recent GNSS rejection streak, and the approximate history buffer usage in bytes. This interface serves runtime monitoring and does not alter the estimation state.
 
-- last GNSS NIS and accept flag
-- GNSS reject streak
-- history buffer sizes and approximate capacity bytes
+The integration rule is therefore simple. Propagate strictly in time, submit every measurement with its physical timestamp, and route any externally imposed covariance or bias intervention through a replay safe API. If those three conditions are met, the estimator can preserve both fixed lag smoothing and delayed measurement consistency without any special handling in the caller.

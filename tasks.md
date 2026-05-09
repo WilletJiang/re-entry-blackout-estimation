@@ -1,40 +1,58 @@
-# GN&C Task Specification: SE-2317 "Entry Blackout State Estimation"
+# GN&C Task Specification: SE 2317 Entry Blackout State Estimation
 
-## Mission Context
+## 1. Scope
 
-* Vehicle: Reusable orbital-class stage, **6-DOF** rigid-body dynamics, belly-first blunt-body re-entry, **RCS** attitude control + movable flaps.
-* Conditions: **Plasma blackout** (GNSS & comm loss) around peak heating, strongly coupled nonlinear aerodynamics ($M\in[2,12]$, high $q_\mathrm{dyn}$), thermal-induced **IMU drift** and **scale-factor nonlinearity**.
-* Objective: Vehicle must enter a controllable guidance corridor within **≤ 2 s** after blackout window exit, with state error and covariance consistency meeting specified constraints.
+This specification defines the state estimation task for a reusable orbital class stage during atmospheric entry. The estimator shall maintain a navigation solution through a plasma induced GNSS blackout and shall recover a guidance usable state estimate within two seconds after blackout exit. Compliance is defined by quantitative accuracy, consistency, robustness, runtime, and memory requirements. Unless stated otherwise, the requirements in this document are normative.
 
----
+## 2. Mission Scenario
 
-## Sensor Configuration (Asynchronous Multi-Sensor)
+The vehicle is a six degree of freedom rigid body that performs a belly first blunt body entry. Attitude control is provided by RCS actuation together with movable aerodynamic surfaces. The aerodynamic regime is strongly nonlinear over approximately Mach two through Mach twelve and is accompanied by high dynamic pressure, strong thermal loading, IMU drift growth, and scale factor nonlinearity.
 
-* **IMU** (400 Hz): 3-axis gyro & accelerometer; noise (1σ): $\sigma_\omega=0.01^\circ/\mathrm{s}/\sqrt{\mathrm{Hz}}$, $\sigma_a=150\,\mu g/\sqrt{\mathrm{Hz}}$; **thermal drift** as random walk.
-* **GNSS** (10 Hz): PVT solution; **complete signal loss** in $[t_0+120\,\mathrm{s},\, t_0+160\,\mathrm{s}]$.
-* **Star Tracker** (2 Hz): quaternion attitude; **fixed delay** $\delta t_\star=120\,\mathrm{ms}$; sun glare **saturation** (data loss) in $[t_0+130,\, t_0+150]$.
-* **Radar Altimeter** (20 Hz): terrain-normal altitude, **valid only below $h<25\,\mathrm{km}$**; delay $\delta t_h=70\,\mathrm{ms}$.
-* **Measurement anomalies**: 5% probability of **heavy-tail/outlier** (Gaussian mixture: 95% $\mathcal N$, 5% Cauchy); data may arrive **out-of-order**.
+The operational objective is precise. The vehicle shall enter a controllable guidance corridor no later than two seconds after the end of the blackout interval. State error alone is insufficient evidence of success. The reported covariance shall remain statistically credible over the same recovery segment.
 
----
+## 3. Sensor Suite and Timing Assumptions
 
-## Repository Implementation Note
+The estimator shall support the asynchronous sensor suite described below.
 
-The current repository realizes this task with a **24-state error-state SR-EKF** that augments the nominal $(r,v,q,\omega,b_g,b_a)$ state with aerodynamic residual force / torque states. Delayed sensors are handled by a fixed-lag **rewind--update--replay** history buffer, and raw GPS tight-coupled updates now participate in that same event replay path. Truth propagation and filter-side nominal linearization share the same nominal aero/RCS composition helper so both sides use a consistent deterministic dynamics model.
+| Sensor | Rate | Observation content | Timing and availability assumptions |
+| --- | --- | --- | --- |
+| IMU | 400 Hz | Three axis gyroscope and accelerometer | Thermal drift shall be modelled as random walk |
+| GNSS | 10 Hz | Position and velocity solution | Complete signal loss from `t0 + 120 s` through `t0 + 160 s` |
+| Star tracker | 2 Hz | Quaternion attitude | Fixed delay of `120 ms`; unavailable from `t0 + 130 s` through `t0 + 150 s` |
+| Radar altimeter | 20 Hz | Terrain normal altitude | Fixed delay of `70 ms`; valid only below `25 km` |
 
----
+Measurement anomalies are part of the task assumptions. Observations may arrive out of order. Heavy tailed contamination shall occur with probability five percent, represented by a Gaussian mixture with ninety five percent nominal samples and five percent Cauchy outliers. Random dropout shall also be considered during robustness evaluation.
 
-## State Vector Definition
+## 4. Estimation Objective
+
+The estimator shall propagate the vehicle state continuously through the blackout interval and shall assimilate asynchronous measurements before blackout and after reacquisition. Delayed or out of order measurements shall be applied at their measurement timestamp. Receipt time shall not be used as the update time. The estimator shall support a fixed lag smoothing mechanism over a horizon no shorter than ten seconds if smoothing is required to satisfy the recovery objective.
+
+The minimum state content shall cover position, velocity, attitude, angular rate, gyroscope bias, and accelerometer bias. Additional residual states may be introduced if they improve model mismatch absorption without violating the runtime and memory limits.
+
+## 5. Functional Requirements
+
+The estimator shall satisfy the following functional requirements.
+
+1. It shall propagate inertial state at the IMU rate and maintain numerical stability over the full mission segment.
+2. It shall process GNSS, star tracker, and radar measurements despite asynchronous arrival and fixed sensor delays.
+3. It shall remain operational through complete GNSS loss over the blackout interval.
+4. It shall reject or down weight non nominal measurements so that sparse outliers do not corrupt either the state or the covariance.
+5. It shall expose sufficient diagnostic information to evaluate innovation consistency and estimation consistency over Monte Carlo campaigns.
+6. It shall support replay safe handling of any externally imposed state or covariance intervention that must survive delayed measurement rewinding.
+
+## 6. Reference State and Model Formulation
+
+This section is informative. It defines the reference formulation used by the current repository realization.
+
+The augmented state is written as
 
 $$
 x = \big[r,\ v,\ q,\ \omega,\ b_g,\ b_a,\ f_{\mathrm{res}},\ \tau_{\mathrm{res}}\big]^\top
 $$
 
-* $r\in\mathbb R^3$ position; $v\in\mathbb R^3$ velocity; $q\in\mathbb H$ unit quaternion; $\omega\in\mathbb R^3$ angular velocity;
-* $b_g, b_a$ are gyro/accelerometer biases (random walk);
-* $f_{\mathrm{res}}, \tau_{\mathrm{res}}$ are residual aerodynamic force/torque states used to absorb model mismatch during blackout and reacquisition.
+where $r\in\mathbb R^3$ is position, $v\in\mathbb R^3$ is velocity, $q\in\mathbb H$ is the unit quaternion attitude, $\omega\in\mathbb R^3$ is angular rate, $b_g$ and $b_a$ are gyroscope and accelerometer biases, and $f_{\mathrm{res}}$ and $\tau_{\mathrm{res}}$ are residual aerodynamic force and torque states used to absorb model mismatch during blackout and reacquisition.
 
-**Continuous-time model:**
+A representative continuous time model is
 
 $$
 \begin{aligned}
@@ -48,11 +66,9 @@ $$
 \end{aligned}
 $$
 
-* $R(q)$: direction cosine matrix (body-to-inertial); $\Omega(\omega)$: quaternion rate matrix;
-* translational state propagation in the repository is IMU strapdown style, while the nominal aerodynamic / RCS composition used by truth propagation and filter-side model linearization comes from the same shared helper;
-* $w_g,w_a,w_{f,\mathrm{res}},w_{\tau,\mathrm{res}}$: zero-mean process noise terms.
+where $R(q)$ is the body to inertial direction cosine matrix, $\Omega(\omega)$ is the quaternion rate matrix, and the $w$ terms are zero mean process noises.
 
-**Measurement model:**
+A representative measurement model is
 
 $$
 \begin{aligned}
@@ -63,17 +79,35 @@ z_h(t_k-\delta t_h) &= h_h(x(t_k-\delta t_h)) + \nu_h
 \end{aligned}
 $$
 
-* Note: delayed star / radar / raw-GNSS observations are applied with **rewind-to-measurement-time + deterministic replay** inside the fixed-lag history buffer.
+Any delayed star tracker, radar, or raw GNSS measurement should be interpreted at its physical measurement time. In the current repository this is realized through rewind, update, and deterministic replay inside a fixed lag history buffer.
 
----
+## 7. Quantitative Acceptance Criteria
 
-## Quantitative Targets
+Let `t_exit = t0 + 160 s` denote blackout exit. The primary acceptance window is the interval from `t_exit` through `t_exit + 2 s`. Unless otherwise stated, the quantitative targets below apply to that interval after any permitted fixed lag smoothing has been applied.
 
-Within **2 s after blackout exit** ($t_\mathrm{exit}=t_0+160\,\mathrm{s}$), including fixed-lag smoothing:
+### 7.1 Accuracy and Bias Recovery
 
-1. **Position error (3σ) ≤ 40 m**; **velocity error (3σ) ≤ 0.5 m/s**.
-2. **Attitude error (3σ) ≤ 0.15°** (equivalent cone angle); **angular rate (3σ) ≤ 0.05°/s**.
-3. **Bias convergence**: $\|b_g\|_{3\sigma} \le 0.005^\circ/\mathrm{s}$, $\|b_a\|_{3\sigma} \le 120\,\mu g$.
-4. **Consistency**: NEES/NIS 95% confidence interval coverage ≥ 90% over 100 Monte Carlo runs.
-5. **Robustness**: No divergence under 5% outlier + 20% random dropout stress test; covariance not overly optimistic (underestimate by no more than 30%).
-6. **Real-time**: **100 Hz main loop**, **single-cycle compute budget ≤ 5 ms** (ARM A78AE single-core equivalent), **memory ≤ 20 MB**; support **fixed-lag smoothing window ≤ 10 s**.
+| Quantity | Requirement |
+| --- | --- |
+| Position error | `3σ ≤ 40 m` |
+| Velocity error | `3σ ≤ 0.5 m s^-1` |
+| Attitude error | `3σ ≤ 0.15 deg` equivalent cone angle |
+| Angular rate error | `3σ ≤ 0.05 deg s^-1` |
+| Gyroscope bias norm | `3σ ≤ 0.005 deg s^-1` |
+| Accelerometer bias norm | `3σ ≤ 120 µg` |
+
+### 7.2 Consistency
+
+Over a Monte Carlo campaign of at least one hundred runs, NEES and NIS ninety five percent confidence interval coverage shall be no lower than ninety percent. A solution that satisfies the accuracy targets while systematically understating covariance shall not be accepted.
+
+### 7.3 Robustness
+
+The estimator shall not diverge under a stress campaign that combines five percent outlier contamination with twenty percent random dropout. Under the same campaign, covariance underestimation shall not exceed thirty percent in the aggregate consistency assessment.
+
+### 7.4 Runtime and Memory
+
+The estimator shall support a one hundred hertz main processing loop with a single cycle compute budget no greater than five milliseconds on an ARM A78AE class single core reference target. Runtime memory attributable to the estimator, including the fixed lag history needed for delayed measurement handling and smoothing, shall not exceed twenty megabytes. The fixed lag horizon shall support at least ten seconds of history.
+
+## 8. Repository Realization Note
+
+This section is informative and describes the current repository realization of the task. The repository implements a 24 state error state square root EKF that augments the nominal translational, rotational, and bias states with residual aerodynamic force and torque states. Delayed sensors are handled through a fixed lag rewind, update, and replay buffer, and raw GNSS tight coupled updates participate in the same event replay path. Truth propagation and filter side nominal linearization call the same aerodynamic and RCS composition helper so that both paths share the same deterministic nominal dynamics.

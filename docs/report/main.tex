@@ -21,10 +21,14 @@
 
 \title{SE-2317 Entry Blackout State Estimation}
 \author{Gao Jiang}
-\date{2026-03-11}
+\date{2026-05-09}
+
+\makeatletter
+\fancyhead[L]{\bfseries\sffamily\small SE-2317 ENTRY BLACKOUT ESTIMATION}
+\makeatother
 
 \abstract{
-This report details the design and validation of a tightly-coupled Square-Root Error-State Kalman Filter (SR-EKF) for the SE-2317 entry vehicle. The architecture features a fixed-lag history buffer with rewind--update--replay semantics to handle delayed and out-of-order sensor data, and raw GPS tight-coupled updates now participate in that same replay path. The robustness layer combines configurable $\chi^2$ gating, Student-t-style covariance inflation, and optional innovation-based adaptive estimation (IAE). To mitigate observability loss during the critical GNSS blackout phase, a dedicated pre-blackout accelerometer bias calibration strategy is implemented. The current 2026-03-11 release campaign reproduces a \textbf{100.0\% pass rate} in tight-coupled mode over 500 Monte Carlo runs, while an additional 100-run quick regression remains consistent at \textbf{100/100} tight and \textbf{96/100} PVT.
+This report presents the current design and validation status of the SE-2317 entry blackout estimator. The implementation is a tightly-coupled Square-Root Error-State Kalman Filter with a fixed-lag history buffer for delayed and out-of-order measurements, replay-safe raw GNSS updates, configurable $\chi^2$ gating, covariance inflation, optional innovation-based adaptive estimation, and pre-blackout accelerometer-bias calibration. The report summarizes the state model, observability considerations, delay handling method, numerical formulation, and Monte Carlo evidence carried by the repository. The current verified record dated 2026-03-11 reports a \textbf{100.0\% pass rate} in tight-coupled mode over 500 Monte Carlo runs, with an additional quick regression at \textbf{100/100} in tight mode and \textbf{96/100} in PVT mode.
 }
 
 \begin{document}
@@ -34,7 +38,7 @@ This report details the design and validation of a tightly-coupled Square-Root E
 \begin{tabular}{@{} l l @{}}
   \textbf{Program} & SE-2317 --- Entry Blackout Estimation \\
   \textbf{Doc Type} & Technical Report \\
-  \textbf{Revision} & A (Draft) \\
+  \textbf{Revision} & B (Draft) \\
   \textbf{Owner} & Gao Jiang \\
 \end{tabular}
 
@@ -43,29 +47,30 @@ This report details the design and validation of a tightly-coupled Square-Root E
   \toprule
   \textbf{Rev} & \textbf{Date} & \textbf{Author} & \textbf{Change Summary} \\
   \midrule
-  A & 2026-03-11 & Gao Jiang & Documentation synchronized to the current estimator implementation and validation flow. \\
+  A & 2026-03-11 & Gao Jiang & Initial report synchronized to the current estimator implementation and validation flow. \\
+  B & 2026-05-09 & Gao Jiang & Narrative, requirements wording, and validation summary aligned with the repository documentation set. \\
   \bottomrule
 \end{tabular}
 
 \section*{Executive Summary}
 \textbf{Objective.} Estimate 6-DOF entry state through a GNSS blackout window and meet the post-blackout (2~s) accuracy and consistency targets in \texttt{tasks.md}.\\
-\textbf{Deliverable.} A research-grade but flight-structured estimator with traceable math, stable numerics, and quantified Monte Carlo performance.
+\textbf{Deliverable.} A documented estimator implementation with traceable mathematics, stable numerics, and reproducible Monte Carlo evidence.
 
-\begin{itemize}
-  \item \textbf{Estimator.} A \emph{square-root} error-state EKF (SR-EKF) on a 24D augmented state:
-  $(r,v,q,\omega,b_g,b_a,f_{\text{res}},\tau_{\text{res}})$, with multiplicative quaternion error injection.
-  \item \textbf{Delayed / out-of-order sensors.} A \emph{fixed-lag history buffer} with \emph{rewind--update--replay} semantics covering GNSS PVT, raw GPS, star tracker, and radar.
-  For linear-Gaussian models this is equivalent to stochastic cloning/factor-graph smoothing on a fixed window; for EKF it is first-order equivalent and empirically stable.
-  \item \textbf{Robustness.} Innovation gating via $\chi^2$ tests (NIS), Student-t-style covariance inflation, replay-safe IAE scaling, and raw-GPS pseudorange down-weighting for heavy tails.
-  \item \textbf{Covariance realism.} Phase-dependent process-noise inflation and blackout-specific aerodynamic residual excitation to prevent overconfidence where model error dominates.
-  \item \textbf{Nominal dynamics symmetry.} Truth propagation and filter-side nominal linearization call the same aerodynamic/RCS composition helper; the filter still integrates de-biased IMU specific force directly to avoid double-counting measured acceleration.
-  \item \textbf{Bias strategy.} A dedicated pre-blackout accelerometer-bias calibration stage (batch normal equations accumulated online) applied at blackout entry to mitigate loss of bias observability during blackout.
-  \item \textbf{Monte Carlo evidence.}
-  \begin{itemize}
-    \item \textbf{Current 500-run release campaign:} tight-coupled GNSS pass rate \textbf{100.0\%} (500/500) under 5\% heavy-tail outliers and 20\% dropout; PVT baseline \textbf{97.0\%} (485/500).
-    \item \textbf{Current release quick regression (2026-03-11, 100 runs):} tight-coupled GNSS \textbf{100.0\%} (100/100), PVT baseline \textbf{96.0\%} (96/100).
-  \end{itemize}
-\end{itemize}
+\paragraph{Architecture summary.}
+The repository implements a square-root error-state EKF on a 24-dimensional augmented state.
+The state is $(r,v,q,\omega,b_g,b_a,f_{\text{res}},\tau_{\text{res}})$ with multiplicative quaternion error injection.
+Truth propagation and filter-side nominal linearization call the same aerodynamic and RCS composition helper.
+The state integrator continues to use de-biased IMU specific force directly.
+
+\paragraph{Timing and robustness summary.}
+Delayed and out-of-order measurements are handled by a fixed-lag history buffer with rewind--update--replay semantics covering GNSS PVT, raw GNSS, star tracker, and radar. The robustness layer combines $\chi^2$ gating, Student-t-style covariance inflation, replay-safe IAE scaling, and pseudorange down-weighting for heavy-tailed residuals. Phase-dependent process-noise scaling and blackout-specific aerodynamic residual excitation are used to keep covariance realistic across mission phases. A pre-blackout accelerometer-bias calibration step is applied at blackout entry.
+
+\paragraph{Validation summary.}
+The current verified release record dated 2026-03-11 reports a tight-coupled GNSS pass rate of
+\textbf{100.0\%} (500/500) under 5\% heavy-tail outliers and 20\% dropout.
+The corresponding PVT baseline pass rate is \textbf{97.0\%} (485/500).
+The same code line also passes a 100-run quick regression at \textbf{100/100} in tight mode
+and \textbf{96/100} in PVT mode.
 
 \section{Problem Setting and Requirements}
 The mission context is a 6-DOF rigid-body entry with strong aero nonlinearity and a GNSS blackout.
@@ -124,7 +129,7 @@ $\sigma_\omega$ and $\sigma_a$, and biases as random walks:
   w_{bg,k}\sim \calN(0,\sigma_{bg}^2 \Delta t\,I),\ w_{ba,k}\sim \calN(0,\sigma_{ba}^2 \Delta t\,I).
 \end{equation}
 \paragraph{Aero residuals.}
-To model dominant entry mismatch, we include residual force/torque states
+To model dominant entry mismatch, we include residual force and torque states
 with Ornstein--Uhlenbeck (OU) discretization:
 \begin{equation}
   f_{\text{res},k+1} = \phi_f f_{\text{res},k} + \eta_{f,k},\qquad
@@ -135,8 +140,11 @@ with $\eta_{f,k}\sim\calN(0,\sigma_f^2(1-\phi_f^2)I)$ and $\eta_{\tau,k}\sim\cal
 This yields a stationary marginal variance $\sigma_f^2 I$ and $\sigma_\tau^2 I$.
 
 \paragraph{Discrete translational acceleration noise.}
-Assume a white specific-force disturbance $w_a\sim\calN(0,\sigma_{a,\text{eff}}^2 I)$ affecting $\dot v$.
-Then the standard continuous-to-discrete integration gives the (RV) block:
+Assume a white specific-force disturbance affecting $\dot v$:
+\begin{equation}
+  w_a\sim\calN(0,\sigma_{a,\text{eff}}^2 I).
+\end{equation}
+The standard continuous-to-discrete integration gives the (RV) block:
 \begin{equation}
   Q_{\{r,v\}}(\Delta t) = \sigma_{a,\text{eff}}^2
   \begin{bmatrix}
@@ -196,7 +204,7 @@ Entry dynamics provide such excitation, but only sensors that constrain $\delta 
 \subsection{Blackout implication and design response}
 During blackout, GNSS-derived constraints are absent; the bias sub-system loses direct observability, and
 any bias correction must come from (i) pre-blackout information, (ii) post-blackout reacquisition, and (iii) conservative covariance growth.
-Therefore we adopt two explicit design decisions:
+The implementation therefore adopts two design decisions:
 \begin{enumerate}
   \item \textbf{Pre-blackout bias calibration} to reduce bias uncertainty before observability is lost.
   \item \textbf{Blackout covariance realism} via increased $Q$ (and aero residual OU excitation) to prevent ``too-certain'' predictions.
@@ -230,7 +238,7 @@ The solution satisfies the normal equations
 Implementation notes: we (i) require a minimum observation count, (ii) enforce SPD via symmetrization and diagonal jitter, and (iii) clamp $\delta b_a$ magnitude
 to a mission-tuned maximum step before applying it at blackout entry.
 
-\section{Time Alignment, Delay Compensation, and Out-of-Order Measurements}
+\section{Time Alignment and Delayed Measurements}
 \subsection{Model of delayed measurements}
 Let a sensor produce a measurement of the state at time $t_z$ but deliver it at a later time $t_{\text{rx}}>t_z$.
 The correct Bayesian update is conditioned on $x(t_z)$:
@@ -250,7 +258,7 @@ A delayed measurement depends only on the clone $x(t_z)$:
   y(t_z) = H\,x(t_z)+\nu,\quad \nu\sim\calN(0,R).
 \end{equation}
 Applying the Kalman update on $\tilde x$ yields the optimal posterior over $x(t_{\text{rx}})$ via the cross-covariance between $x(t_z)$ and $x(t_{\text{rx}})$.
-This is the standard stochastic-cloning / fixed-lag smoothing construction.
+This corresponds to the usual stochastic-cloning fixed-lag smoothing construction.
 
 \subsection{Implementation: rewind--update--replay (fixed horizon)}
 Instead of explicitly augmenting the state, we maintain a fixed-lag buffer of:
@@ -268,10 +276,10 @@ On receiving a measurement with timestamp $t_z < t_{\text{now}}$:
 \end{enumerate}
 
 \paragraph{Correctness statement (linear case).}
-For linear-Gaussian models with deterministic replay of the same event sequence, the rewind--update--replay procedure
-produces the identical posterior as the stochastic cloning formulation, because it reconstructs the correct conditional prior at $t_z$
-and then re-applies the same Bayes updates in time order.
-For EKF, this is a first-order approximation (local linearization); empirically it remains stable under the tested delay/outlier regimes.
+For linear-Gaussian models with deterministic replay of the same event sequence,
+the rewind--update--replay procedure produces the same posterior as stochastic cloning.
+It reconstructs the correct conditional prior at $t_z$ and then re-applies the same Bayes updates in time order.
+For EKF, this remains a first-order local linearization and is empirically stable under the tested delay and outlier regimes.
 
 \section{Robustness and Consistency Calibration}
 \label{sec:robustness-consistency}
@@ -297,7 +305,7 @@ We accept a measurement update if
   \mathrm{NIS} \le \chi^2_{\nu}(1-\alpha),
 \end{equation}
 where $\alpha$ is the gate significance (false-rejection probability).
-This is a sharp, fail-fast boundary: it prevents a small fraction of outliers from corrupting the state and (critically) the covariance.
+The gate limits the effect of sparse outliers on both the state and the covariance.
 
 \subsection{Heavy-tail mitigation for tight-coupled pseudorange}
 For raw GNSS pseudorange rows, we additionally apply a robust variance inflation:
@@ -307,7 +315,7 @@ For $|u_i|>k$, we inflate the measurement variance as
   R_{ii} \leftarrow R_{ii}\,\left(\min\!\left(\frac{|u_i|}{k},c\right)\right)^2,
 \end{equation}
 with constants $k=4$ and cap $c=100$.
-This is equivalent to an $M$-estimator with a Huber-like influence function:
+The resulting weighting is equivalent to an $M$-estimator with a Huber-like influence function:
 large residuals receive reduced weight without forcing hard rejection.
 
 \subsection{Runtime robust tuning}
@@ -382,7 +390,7 @@ Kernel & iterations & time per iter \\
 \bottomrule
 \end{tabular}
 \end{center}
-These benchmarks establish a significant margin against the \SI{5}{ms} cycle budget. While direct timing equivalence to the target ARM A78AE processing core requires hardware validation, the kernel execution times ($\mathcal{O}(\si{\micro s})$) indicate high likelihood of timing compliance.
+These benchmarks establish a substantial margin against the \SI{5}{ms} cycle budget. Direct timing equivalence to the target ARM A78AE processing core still requires hardware validation. The kernel execution times on the development machine remain in the microsecond range.
 
 \section{Monte Carlo Verification and Results}
 \subsection{Fault injection matrix (harness)}
@@ -427,9 +435,11 @@ Tight-coupled & 100.0\% & 1.93 & 0.026 & 4.89 / 0.948 \\
 \end{center}
 
 \paragraph{Interpretation.}
-The tight-coupled configuration eliminates the rare catastrophic RV inconsistency events observed in the PVT baseline.
-The PVT baseline exhibits a heavy-tailed NEES distribution (95th percentile $\approx 7.14$ but max $\approx 3.18\times 10^4$),
-indicating occasional severe model mismatch or update corruption; these are suppressed by tight-coupling gating and robustification.
+The tight-coupled configuration removes the rare catastrophic RV inconsistency events seen in the PVT baseline.
+The PVT baseline exhibits a heavy-tailed NEES distribution with 95th percentile $\approx 7.14$
+and maximum $\approx 3.18\times 10^4$.
+This pattern indicates occasional severe model mismatch or update corruption.
+The tight-coupled path suppresses these cases through geometry control, gating, and robustification.
 
 \subsection{Plots}
 \begin{figure}[h]
@@ -493,9 +503,8 @@ The report corresponds to the following code modules:
 \end{itemize}
 
 \section{Conclusion}
-The tight-coupled SR-EKF with delay-aware rewind/replay and fixed-lag smoothing achieves $>95\%$ pass rate with margin (measured at 100\%)
-under the prescribed dropout/outlier/blackout stress.
-The remaining engineering work is targeted: tighten per-phase consistency (especially within blackout where NEES is conservative),
-and add explicit bias step-fault stress tests to close the fault-injection matrix.
+The current repository implements a tight-coupled square-root error-state EKF with delay-aware rewind--update--replay, fixed-lag smoothing, phase-dependent covariance control, and pre-blackout bias calibration. The verified record dated 2026-03-11 shows a 100.0\% pass rate in the 500-run tight-coupled Monte Carlo campaign and a 97.0\% pass rate in the PVT baseline under the prescribed blackout, dropout, and outlier conditions.
+
+The remaining work is well bounded. The most useful next steps are tighter per-phase consistency control, especially during blackout where NEES remains conservative, and explicit bias step-fault campaigns to complete the fault-injection matrix.
 
 \end{document}

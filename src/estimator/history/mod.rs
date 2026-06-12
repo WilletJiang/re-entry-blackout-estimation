@@ -2,6 +2,9 @@ use super::{bias_cal::BiasCal, GnssMeas, GpsRawMeas, MatN, RadarMeas, StarMeas};
 use crate::types::ImuSample;
 use std::collections::VecDeque;
 
+const SNAPSHOT_RESERVE_PAD: usize = 32;
+const EVENT_RESERVE_PAD: usize = 128;
+
 #[derive(Clone)]
 pub(super) struct Snapshot {
     pub state: crate::types::State,
@@ -13,6 +16,7 @@ pub(super) struct Snapshot {
 pub(super) struct PropRecord {
     pub phi: MatN,
     pub q: MatN,
+    pub predicted_end_state: crate::types::State,
 }
 
 #[derive(Clone)]
@@ -69,8 +73,8 @@ impl Event {
 pub(super) struct HistoryBuffer {
     horizon: f64,
     pub snapshots: VecDeque<Snapshot>,
+    pub props: VecDeque<Option<PropRecord>>,
     pub events: VecDeque<Event>,
-    pub props: VecDeque<PropRecord>,
 }
 
 impl HistoryBuffer {
@@ -84,19 +88,21 @@ impl HistoryBuffer {
         Self {
             horizon,
             snapshots: VecDeque::with_capacity(snap_cap),
-            events: VecDeque::with_capacity(ev_cap),
             props: VecDeque::with_capacity(snap_cap),
+            events: VecDeque::with_capacity(ev_cap),
         }
     }
 
     pub(super) fn push_snapshot(&mut self, snap: Snapshot) {
+        reserve_small_pad_if_full(&mut self.snapshots, SNAPSHOT_RESERVE_PAD);
         self.snapshots.push_back(snap);
+        self.pad_missing_prop_intervals();
         self.prune();
     }
 
     pub(super) fn push_prop(&mut self, prop: PropRecord) {
-        self.props.push_back(prop);
-        self.prune();
+        reserve_small_pad_if_full(&mut self.props, SNAPSHOT_RESERVE_PAD);
+        self.props.push_back(Some(prop));
     }
 
     pub(super) fn push_event(&mut self, ev: Event) {
@@ -109,6 +115,7 @@ impl HistoryBuffer {
             ev.time(),
             self.events.back().map(|e| e.time()).unwrap_or(f64::NAN)
         );
+        reserve_small_pad_if_full(&mut self.events, EVENT_RESERVE_PAD);
         self.events.push_back(ev);
         self.prune();
     }
@@ -125,6 +132,9 @@ impl HistoryBuffer {
             .unwrap_or(false)
         {
             self.snapshots.pop_front();
+            if !self.props.is_empty() {
+                self.props.pop_front();
+            }
         }
         while self
             .events
@@ -147,4 +157,18 @@ impl HistoryBuffer {
             .find(|(_, s)| s.state.t <= t)
             .map(|(i, _)| i)
     }
+
+    fn pad_missing_prop_intervals(&mut self) {
+        while self.props.len() + 1 < self.snapshots.len() {
+            reserve_small_pad_if_full(&mut self.props, SNAPSHOT_RESERVE_PAD);
+            self.props.push_back(None);
+        }
+    }
+}
+
+fn reserve_small_pad_if_full<T>(buffer: &mut VecDeque<T>, reserve_pad: usize) {
+    if buffer.len() < buffer.capacity() {
+        return;
+    }
+    buffer.reserve_exact(reserve_pad);
 }

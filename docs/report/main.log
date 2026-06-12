@@ -1,4 +1,4 @@
-This is XeTeX, Version 3.141592653-2.6-0.999997 (TeX Live 2025/Homebrew) (preloaded format=xelatex 2025.3.15)  9 MAY 2026 23:56
+This is XeTeX, Version 3.141592653-2.6-0.999997 (TeX Live 2025/Homebrew) (preloaded format=xelatex 2025.3.15)  13 JUN 2026 01:34
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -1071,11 +1071,16 @@ LaTeX Font Info:    Font shape `TU/FiraMath-Regular.otf(3)/m/n' will be
 [1
 
 ]
+Underfull \hbox (badness 10000) in paragraph at lines 52--53
+[]|\TU/suisseintl-regular.otf(0)/m/n/9 Recovery-window reacquisition behavior, 
+tight-coupling
+ []
+
 LaTeX Font Info:    Font shape `TU/PragmataPro_Mono_R_liga_0829.ttf(0)/m/n' wil
 l be
-(Font)              scaled to size 9.73343pt on input line 56.
+(Font)              scaled to size 9.73343pt on input line 57.
 
-Overfull \hbox (0.61134pt too wide) in paragraph at lines 60--64
+Overfull \hbox (0.61134pt too wide) in paragraph at lines 61--65
 [] [] \TU/suisseintl-regular.otf(0)/b/n/10 Architecture summary.[] \TU/suissein
 tl-regular.otf(0)/m/n/10 The repository implements a square-root error-state EK
 F on a 24-dimensional
@@ -1093,35 +1098,32 @@ F on a 24-dimensional
 
 [5]
 LaTeX Font Info:    Font shape `TU/FiraMath-Regular.otf(2)/m/n' will be
-(Font)              scaled to size 12.00128pt on input line 331.
+(Font)              scaled to size 12.00128pt on input line 310.
 LaTeX Font Info:    Font shape `TU/FiraMath-Regular.otf(2)/m/n' will be
-(Font)              scaled to size 8.00085pt on input line 331.
+(Font)              scaled to size 8.00085pt on input line 310.
 LaTeX Font Info:    Font shape `TU/FiraMath-Regular.otf(3)/m/n' will be
-(Font)              scaled to size 11.99872pt on input line 331.
+(Font)              scaled to size 11.99872pt on input line 310.
 LaTeX Font Info:    Font shape `TU/FiraMath-Regular.otf(3)/m/n' will be
-(Font)              scaled to size 7.99915pt on input line 331.
+(Font)              scaled to size 7.99915pt on input line 310.
 
 
 [6]
 LaTeX Font Info:    Font shape `TU/PragmataPro_Mono_R_liga_0829.ttf(0)/m/n' wil
 l be
-(Font)              scaled to size 8.76009pt on input line 386.
+(Font)              scaled to size 8.76009pt on input line 361.
 
 
 [7]
-Overfull \hbox (1.83801pt too wide) in paragraph at lines 438--443
+Overfull \hbox (0.91881pt too wide) in paragraph at lines 405--409
 [] [] \TU/suisseintl-regular.otf(0)/b/n/10 Interpretation.[] \TU/suisseintl-reg
-ular.otf(0)/m/n/10 The tight-coupled configuration removes the rare catastrophi
-c RV inconsistency events
+ular.otf(0)/m/n/10 The historical 500-run record showed that tight coupling rem
+oved the rare catastrophic
  []
 
 File: figures/mc_nees_nis_tight.pdf Graphic file (type pdf)
 <use figures/mc_nees_nis_tight.pdf>
 File: figures/mc_rmspos_hist_tight.pdf Graphic file (type pdf)
 <use figures/mc_rmspos_hist_tight.pdf>
-
-LaTeX Warning: `h' float specifier changed to `ht'.
-
 File: figures/mc_accel_bias_hist_tight.pdf Graphic file (type pdf)
 <use figures/mc_accel_bias_hist_tight.pdf>
 File: figures/mc_pass_rate_tight.pdf Graphic file (type pdf)
@@ -1132,9 +1134,9 @@ LaTeX Warning: `h' float specifier changed to `ht'.
 File: figures/mc_blackout_envelope_tight.pdf Graphic file (type pdf)
 <use figures/mc_blackout_envelope_tight.pdf>
 LaTeX Font Info:    Font shape `TU/FiraMath-Regular.otf(2)/m/n' will be
-(Font)              scaled to size 7.00075pt on input line 482.
+(Font)              scaled to size 7.00075pt on input line 448.
 LaTeX Font Info:    Font shape `TU/FiraMath-Regular.otf(3)/m/n' will be
-(Font)              scaled to size 6.99925pt on input line 482.
+(Font)              scaled to size 6.99925pt on input line 448.
 File: figures/mc_blackout_nees_time_tight.pdf Graphic file (type pdf)
 <use figures/mc_blackout_nees_time_tight.pdf>
 
@@ -1152,15 +1154,15 @@ LaTeX2e <2024-11-01> patch level 2
 L3 programming layer <2025-01-18>
  ***********
 Package rerunfilecheck Info: File `main.out' has not changed.
-(rerunfilecheck)             Checksum: E304DC718D2B1BD8D8CB799E93ED9767;8219.
+(rerunfilecheck)             Checksum: C92B7B12F868D5D67E9EDBD55C2DA5FB;8292.
  ) 
 Here is how much of TeX's memory you used:
- 25057 strings out of 473832
- 517147 string characters out of 5719382
- 1017448 words of memory out of 5000000
- 47825 multiletter control sequences out of 15000+600000
+ 25049 strings out of 473832
+ 516945 string characters out of 5719382
+ 1016465 words of memory out of 5000000
+ 47817 multiletter control sequences out of 15000+600000
  563811 words of font info for 119 fonts, out of 8000000 for 9000
  1348 hyphenation exceptions out of 8191
- 94i,13n,130p,845b,1044s stack positions out of 10000i,1000n,20000p,200000b,200000s
+ 94i,13n,130p,1032b,1044s stack positions out of 10000i,1000n,20000p,200000b,200000s
 
 Output written on main.pdf (11 pages).

@@ -3,12 +3,17 @@ use crate::util::enforce_pd;
 use nalgebra::UnitQuaternion;
 
 impl Estimator {
+    /// Smooth the estimator history over a fixed lag.
+    ///
+    /// `lag_sec` is measured backward from the newest snapshot time. The
+    /// function returns `None` when the history does not cover the requested lag
+    /// or when the backward pass encounters a numerically unrecoverable step.
     pub fn rts_smooth(&self, lag_sec: f64) -> Option<(crate::types::State, MatN)> {
         let n_snap = self.history.snapshots.len();
         if n_snap == 0 {
             return None;
         }
-        let newest = self.history.snapshots.back().unwrap();
+        let newest = self.history.snapshots.back()?;
         let target_t = newest.state.t - lag_sec;
         let target_idx = self.history.find_snapshot_index(target_t)?;
 
@@ -27,6 +32,8 @@ impl Estimator {
         let mut p_s: Vec<MatN> = p_f.clone();
 
         if n_snap == 1 {
+            // The caller needs an owned state while the history buffer remains
+            // immutably borrowed for the duration of this method.
             return Some((x_s[0].clone(), p_s[0]));
         }
 
@@ -35,9 +42,13 @@ impl Estimator {
         let zero = MatN::zeros();
 
         for k in (0..newest_idx).rev() {
-            let (phi_k, q_k) = if k < self.history.props.len() {
-                let pr = &self.history.props[k];
-                (&pr.phi, &pr.q)
+            let prop_k = if k < self.history.props.len() {
+                self.history.props[k].as_ref()
+            } else {
+                None
+            };
+            let (phi_k, q_k) = if let Some(prop_record) = prop_k {
+                (&prop_record.phi, &prop_record.q)
             } else {
                 (&eye, &zero)
             };
@@ -48,16 +59,19 @@ impl Estimator {
                 Some(inv) => inv,
                 None => {
                     let l_pred = chol_lower_with_enforce(p_pred, "rts_smooth P_pred");
-                    let l_inv = l_pred
-                        .try_inverse()
-                        .expect("Cholesky factor must be invertible for SPD P_pred");
+                    let l_inv = l_pred.try_inverse()?;
                     let l_inv_t = l_inv.transpose();
                     l_inv_t * l_inv
                 }
             };
             let a_k = p_f[k] * phi_k.transpose() * p_pred_inv;
 
-            let dx_next = state_error(&x_s[k + 1], &self.history.snapshots[k + 1].state);
+            let predicted_next_state = if let Some(prop_record) = prop_k {
+                &prop_record.predicted_end_state
+            } else {
+                &self.history.snapshots[k + 1].state
+            };
+            let dx_next = state_error(&x_s[k + 1], predicted_next_state);
             let dx = a_k * dx_next;
             x_s[k] = vec_to_state(&self.history.snapshots[k].state, dx);
 
@@ -66,6 +80,8 @@ impl Estimator {
             p_s[k] = p_new;
         }
 
+        // The caller needs an owned state while the history buffer remains
+        // immutably borrowed for the duration of this method.
         Some((x_s[target_idx].clone(), p_s[target_idx]))
     }
 }

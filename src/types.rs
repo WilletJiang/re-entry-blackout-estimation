@@ -102,9 +102,10 @@ impl Default for NoiseParams {
 impl NoiseParams {
     pub fn tuned() -> Self {
         let mut n = Self::default();
-        // Bias is nearly constant over the short mission window; keep RW small so
-        // GNSS can actually converge it instead of it random-walking away.
-        n.accel_bias_rw = 5e-6_f64 * 9.80665; // 5 µg/√Hz in SI units
+        n.gyro_bias_rw = 7e-5_f64.to_radians(); // 0.07 mdps/√Hz
+                                                // Bias is nearly constant over the short mission window; keep RW small so
+                                                // GNSS can actually converge it instead of it random-walking away.
+        n.accel_bias_rw = 2e-6_f64 * 9.80665; // 2 µg/√Hz in SI units
                                               // Keep translational process noise in-family with the IMU spec so that
                                               // GNSS velocity can actually calibrate accelerometer bias (otherwise Q dominates).
         n.accel_residual = 0.003; // m/s²/√Hz (~300 µg)

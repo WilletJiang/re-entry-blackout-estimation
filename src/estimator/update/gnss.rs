@@ -66,6 +66,13 @@ impl Estimator {
         } else {
             None
         };
+        let predicted_end_state = if self.seg_has_data {
+            // RTS needs the propagation prior at this timestamp after the update
+            // mutates `self.state`, so the pre-update state must be owned here.
+            Some(self.state.clone())
+        } else {
+            None
+        };
         let mut h = MeasMat::<6>::zeros();
         for i in 0..3 {
             h[(i, i)] = 1.0;
@@ -152,7 +159,7 @@ impl Estimator {
         self.update_aero_learning(meas.vel, meas.t);
 
         self.state.t = meas.t;
-        self.maybe_checkpoint(true);
+        self.maybe_checkpoint_with_prediction(true, predicted_end_state);
         if record {
             self.history.push_event(Event::Gnss(meas));
         }

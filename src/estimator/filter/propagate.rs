@@ -65,7 +65,8 @@ impl Estimator {
         self.state.t = imu.t;
 
         let (phi, qk) = self.linearize(dt, linearize_specific_force_b);
-        self.time_update_sqrt(&phi, &qk);
+        let lq = self.process_noise_factor(&qk);
+        self.time_update_sqrt_with_factor(&phi, &lq);
         self.accumulate_segment(&phi, &qk);
         if record {
             self.history
@@ -114,9 +115,14 @@ impl Estimator {
         (phi, qk)
     }
 
+    #[cfg_attr(not(any(test, feature = "diagnostics")), allow(dead_code))]
     pub(super) fn time_update_sqrt(&mut self, phi: &MatN, qk: &MatN) {
-        let a = phi * self.l_cov;
         let lq = chol_lower_with_enforce(*qk, "time_update_sqrt Qk");
+        self.time_update_sqrt_with_factor(phi, &lq);
+    }
+
+    fn time_update_sqrt_with_factor(&mut self, phi: &MatN, lq: &MatN) {
+        let a = phi * self.l_cov;
 
         let mut mt = Mat2NByN::zeros();
         for r in 0..STATE_DIM {

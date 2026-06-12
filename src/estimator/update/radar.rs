@@ -12,6 +12,13 @@ impl Estimator {
         } else {
             None
         };
+        let predicted_end_state = if self.seg_has_data {
+            // RTS needs the propagation prior at this timestamp after the update
+            // mutates `self.state`, so the pre-update state must be owned here.
+            Some(self.state.clone())
+        } else {
+            None
+        };
         let r_norm = self.state.r.norm();
         let alt_pred = r_norm - self.dyn_params.radius_earth;
         let z = SVector::<f64, 1>::new(meas.alt - alt_pred);
@@ -28,7 +35,7 @@ impl Estimator {
             self.replay_tail(replay_events);
             return;
         }
-        self.maybe_checkpoint(true);
+        self.maybe_checkpoint_with_prediction(true, predicted_end_state);
         if record {
             self.history.push_event(Event::Radar(meas));
         }

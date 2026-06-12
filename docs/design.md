@@ -1,6 +1,6 @@
 # Design Note: Entry Blackout Estimation
 
-This note records the estimator design currently used to satisfy the acceptance basis defined in `tasks.md`. The estimator must cross a forty second GNSS blackout, recover within the two second post blackout window, preserve covariance credibility, and remain inside the runtime and memory envelope of the task.
+This note records the estimator design currently used to satisfy the acceptance basis defined in `tasks.md`. The estimator must cross a forty second GNSS blackout, recover within the two second post blackout window, preserve covariance credibility, and remain inside the runtime and memory envelope of the task. In the diagnostics workflow, recovery window RMS errors are reported for diagnosis, while per run acceptance is evaluated from recovery window norm equivalent three sigma maxima.
 
 ## Design Objective
 
@@ -22,6 +22,8 @@ This structure keeps covariance realistic across regime changes. A uniform proce
 
 The update architecture is intentionally conservative. GNSS PVT updates operate on the position and velocity subspace only, which prevents spurious cross covariance from pulling attitude and bias states in poorly supported directions. Star tracker updates remain attitude only. Radar updates remain scalar altitude updates. Raw GNSS updates fuse pseudorange and Doppler directly when tight coupling is enabled.
 
+The baseline PVT path now uses a single measurement construction rule for both nominal tracking and blackout exit reacquisition. The recovery update is applied at blackout exit itself, and its velocity covariance matches the ordinary PVT update. This keeps the recovery window velocity bound aligned with the intended PVT sensor model from the first accepted sample onward.
+
 All updates are gated by NIS based chi square tests. The covariance update uses Joseph form together with explicit positive definiteness enforcement. When numerical roundoff or aggressive tuning threatens symmetry or definiteness, the code falls back through Cholesky repair, diagonal jitter, and spectral regularization.
 
 ## Temporal Alignment and History Semantics
@@ -32,9 +34,7 @@ This contract yields two important invariants. The first is temporal consistency
 
 ## Tight Coupling Strategy
 
-The tight coupled path is implemented in `update_gps_raw_ref`. Pseudorange rows are robustified against heavy tailed residuals. Pseudorange is also prevented from directly updating velocity, which reduces noise injection through position and velocity cross covariance. Doppler rows carry the main velocity information, but that information becomes unreliable when the satellite geometry loses rank in the weakest direction. The implementation therefore checks the Doppler geometry and removes the weakest velocity direction when conditioning deteriorates.
-
-This conditioning step removes the rare and severe recovery phase failures previously observed in the tight coupled tail.
+The tight coupled path is implemented in `update_gps_raw_ref`. Pseudorange rows are robustified against heavy tailed residuals. Pseudorange is also prevented from directly updating velocity, which reduces noise injection through position and velocity cross covariance. Doppler rows carry the main velocity information, but that information can become unreliable during the short reacquisition interval immediately after blackout exit. The implementation therefore checks the Doppler geometry and removes the weakest velocity direction only inside the two second recovery window. Outside that interval the full Doppler geometry is retained, so the nominal pre blackout solution continues to accumulate translational information and enters blackout with a well constrained prior.
 
 ## Bias Management
 
@@ -42,6 +42,8 @@ Accelerometer bias is the most delicate hidden state in this task because blacko
 
 ## Runtime and Memory Envelope
 
-History snapshots are stored at a default cadence of one hundred hertz. IMU events are stored at IMU rate for replay, and the propagation records needed for RTS smoothing are retained between snapshots. With a ten second fixed lag horizon, this design is intended to remain within the twenty megabyte task limit. Runtime health can be inspected through `Estimator::health()`, which exposes recent GNSS gate status together with history usage statistics.
+History snapshots are stored at a default cadence of one hundred hertz. IMU events are stored at IMU rate for replay, and the propagation records needed for RTS smoothing are retained between snapshots. The diagnostics harness now runs with a ten second fixed lag horizon by default so that the validation path matches the task requirement. Runtime health can be inspected through `Estimator::health()`, which exposes recent GNSS gate status together with history usage statistics, and the harness records the peak history counters and memory estimate into its summary artifacts.
+
+When blackout trace recording is enabled, the recorder stores position error, velocity error, norm equivalent position three sigma, norm equivalent velocity three sigma, and RV NEES on a common time grid. The trace therefore mirrors the acceptance convention used by the per run summary and supports direct time localization of recovery window regressions.
 
 In summary, the estimator combines four mechanisms that address distinct blackout recovery risks. The square root covariance form protects numerical stability, the history buffer preserves time consistency, tight coupled raw GNSS improves recovery observability, and pre blackout bias calibration reduces hidden drift before the least observable phase.

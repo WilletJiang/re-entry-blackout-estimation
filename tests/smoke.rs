@@ -1,3 +1,8 @@
+#[cfg(feature = "diagnostics")]
+use entry_blackout_estimation::{
+    data::RcsTorqueSeries,
+    sim::{simulate_single_with_trace, BlackoutTraceConfig, MonteCarloTraceResult, SimConfig},
+};
 use entry_blackout_estimation::{
     data::{load_vehicle_props, AeroCoeff, AeroTable},
     estimator::{Estimator, GnssMeas, RadarMeas, StarMeas},
@@ -5,6 +10,8 @@ use entry_blackout_estimation::{
     types::{DynamicsParams, ImuSample, NoiseParams},
 };
 use nalgebra::{linalg::Cholesky, Matrix3, Matrix6, UnitQuaternion, Vector3};
+#[cfg(feature = "diagnostics")]
+use std::sync::Arc;
 
 #[test]
 fn load_data_and_interp() {
@@ -118,4 +125,93 @@ fn aero_interp_clamped_no_double_count() {
     assert!((c.cl_p - coeff.cl_p).abs() < 1e-12);
     assert!((c.cm_q - coeff.cm_q).abs() < 1e-12);
     assert!((c.cn_r - coeff.cn_r).abs() < 1e-12);
+}
+
+#[cfg(feature = "diagnostics")]
+#[test]
+fn pvt_recovery_window_velocity_sigma_stays_inside_acceptance() {
+    let trace_cfg = recovery_trace_config();
+    let trace_out = run_trace_case(0, false, trace_cfg);
+    let vel_sigma3_max_mps = max_trace_value_in_window(
+        &trace_out.trace.vel_sigma3_mps,
+        trace_cfg,
+        trace_cfg.blackout_end,
+    );
+
+    assert!(trace_out.result.passed);
+    assert!(vel_sigma3_max_mps <= 0.5 + 1.0e-3);
+}
+
+#[cfg(feature = "diagnostics")]
+#[test]
+fn tight_seed_zero_stays_bounded_through_blackout_exit() {
+    let trace_cfg = recovery_trace_config();
+    let trace_out = run_trace_case(0, true, trace_cfg);
+    let max_pos_err_m = max_trace_value_in_window(
+        &trace_out.trace.pos_err_m,
+        trace_cfg,
+        trace_cfg.blackout_end,
+    );
+
+    assert!(trace_out.result.passed);
+    assert!(max_pos_err_m <= 10.0);
+}
+
+#[cfg(feature = "diagnostics")]
+#[test]
+fn tight_seed_five_stays_bounded_through_recovery_window() {
+    let trace_cfg = recovery_trace_config();
+    let trace_out = run_trace_case(5, true, trace_cfg);
+    let max_pos_err_m = max_trace_value_in_window(
+        &trace_out.trace.pos_err_m,
+        trace_cfg,
+        trace_cfg.blackout_end,
+    );
+
+    assert!(trace_out.result.passed);
+    assert!(max_pos_err_m <= 10.0);
+}
+
+#[cfg(feature = "diagnostics")]
+fn recovery_trace_config() -> BlackoutTraceConfig {
+    BlackoutTraceConfig {
+        t_start: 159.995,
+        t_end: 162.0,
+        dt: 0.0025,
+        blackout_start: 120.0,
+        blackout_end: 160.0,
+    }
+}
+
+#[cfg(feature = "diagnostics")]
+fn run_trace_case(
+    seed: u64,
+    use_tight_coupling: bool,
+    trace_cfg: BlackoutTraceConfig,
+) -> MonteCarloTraceResult {
+    let dyn_params = load_vehicle_props("data/Vehicle Properties Preview.csv").unwrap();
+    let aero = Arc::new(AeroTable::load("data/Aero Coeff Table.csv").unwrap());
+    let rcs = Arc::new(RcsTorqueSeries::load("data/RCS Torque Series 100Hz Preview.csv").unwrap());
+    let noise = NoiseParams::tuned();
+    let mut cfg = SimConfig::default();
+    cfg.use_tight_coupling = use_tight_coupling;
+    simulate_single_with_trace(seed, dyn_params, noise, aero, rcs, cfg, trace_cfg)
+}
+
+#[cfg(feature = "diagnostics")]
+fn max_trace_value_in_window(
+    samples: &[f32],
+    trace_cfg: BlackoutTraceConfig,
+    window_start_s: f64,
+) -> f32 {
+    let mut max_value = f32::NEG_INFINITY;
+    for (sample_idx, &sample) in samples.iter().enumerate() {
+        if trace_cfg.time_at(sample_idx) + trace_cfg.dt < window_start_s {
+            continue;
+        }
+        if sample > max_value {
+            max_value = sample;
+        }
+    }
+    max_value
 }

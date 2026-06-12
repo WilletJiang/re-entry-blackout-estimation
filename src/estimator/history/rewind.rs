@@ -71,8 +71,15 @@ impl Estimator {
                 self.maybe_checkpoint(true);
             }
             Event::BiasCalApply { t: _ } => {
-                let _ = self.apply_bias_calibration();
-                self.maybe_checkpoint(true);
+                let predicted_end_state = if self.seg_has_data {
+                    // RTS needs the propagation prior at this timestamp after
+                    // the calibration mutates `self.state`.
+                    Some(self.state.clone())
+                } else {
+                    None
+                };
+                self.apply_bias_calibration();
+                self.maybe_checkpoint_with_prediction(true, predicted_end_state);
             }
         }
     }

@@ -1,7 +1,6 @@
 use super::{
     metrics, MonteCarloResult, SimConfig, SimRun, CHI2_3_HI, CHI2_3_LO, CHI2_6_HI, CHI2_6_LO,
 };
-use crate::estimator::Estimator;
 use crate::sim::BlackoutTrace;
 use nalgebra::{linalg::Cholesky, Matrix3, Matrix6, SVector, Vector3};
 
@@ -11,12 +10,13 @@ pub(super) struct SimFinish {
 }
 
 impl SimRun {
-    pub(super) fn accumulate_recovery_errors(&mut self, t: f64, step: usize) {
-        let pos_err = self.est.state.r - self.truth.r;
-        let vel_err = self.est.state.v - self.truth.v;
-        if t < self.cfg.blackout_end || t > self.cfg.blackout_end + 2.0 {
+    pub(super) fn accumulate_recovery_window_stats(&mut self, step: usize) {
+        let t = self.est.state.t;
+        if !in_recovery_window(t, &self.cfg) {
             return;
         }
+        let pos_err = self.est.state.r - self.truth.r;
+        let vel_err = self.est.state.v - self.truth.v;
         self.pos_err2_acc += pos_err.norm_squared();
         self.vel_err2_acc += vel_err.norm_squared();
         let dq = self.est.state.q * self.truth.q.inverse();
@@ -34,13 +34,66 @@ impl SimRun {
         self.bg_err2_acc += bg_err.norm_squared();
         self.ba_err2_acc += ba_err.norm_squared();
         self.err_samples += 1.0;
+
+        let p = self.est.cov();
+        self.pos_sigma3_max_m = self.pos_sigma3_max_m.max(sigma3_norm_from_cov(
+            &p.fixed_view::<3, 3>(0, 0).into_owned(),
+        ));
+        self.vel_sigma3_max_mps = self.vel_sigma3_max_mps.max(sigma3_norm_from_cov(
+            &p.fixed_view::<3, 3>(3, 3).into_owned(),
+        ));
+        self.att_sigma3_max_deg = self
+            .att_sigma3_max_deg
+            .max(sigma3_norm_from_cov(&p.fixed_view::<3, 3>(6, 6).into_owned()).to_degrees());
+        self.bg_sigma3_max_dps = self
+            .bg_sigma3_max_dps
+            .max(sigma3_norm_from_cov(&p.fixed_view::<3, 3>(12, 12).into_owned()).to_degrees());
+        self.ba_sigma3_max_ug = self.ba_sigma3_max_ug.max(
+            sigma3_norm_from_cov(&p.fixed_view::<3, 3>(15, 15).into_owned()) / 9.80665 * 1.0e6,
+        );
+    }
+
+    pub(super) fn accumulate_smoothed_recovery_window_stats(&mut self) {
+        let current_t = self.est.state.t;
+        if current_t + 1.0e-9 < self.cfg.history_sec {
+            return;
+        }
+        let target_t = current_t - self.cfg.history_sec;
+        if !in_recovery_window(target_t, &self.cfg) {
+            return;
+        }
+
+        let Some((smoothed_state, _smoothed_cov)) = self.est.rts_smooth(self.cfg.history_sec)
+        else {
+            return;
+        };
+        if !in_recovery_window(smoothed_state.t, &self.cfg) {
+            return;
+        }
+        let Some(truth_at) =
+            truth_state_at_or_before(&self.truth_times, &self.truth_hist, smoothed_state.t)
+        else {
+            return;
+        };
+        let pos_err = smoothed_state.r - truth_at.r;
+        let vel_err = smoothed_state.v - truth_at.v;
+        self.sm_pos_err2_acc += pos_err.norm_squared();
+        self.sm_vel_err2_acc += vel_err.norm_squared();
+        self.sm_samples += 1.0;
+    }
+
+    pub(super) fn record_health_peak(&mut self) {
+        let health = self.est.health();
+        self.history_peak_snapshots = self.history_peak_snapshots.max(health.history_snapshots);
+        self.history_peak_events = self.history_peak_events.max(health.history_events);
+        self.history_peak_props = self.history_peak_props.max(health.history_props);
+        self.history_peak_capacity_bytes = self
+            .history_peak_capacity_bytes
+            .max(health.history_capacity_bytes);
     }
 
     pub(super) fn finish(self) -> SimFinish {
         let (nees_stats, nees_phase_stats) = compute_nees_stats(self.nees_samples);
-
-        let (sm_rms_pos, sm_rms_vel) =
-            smoother_metrics(&self.est, &self.cfg, &self.truth_times, &self.truth_hist);
 
         let nees_mean = nees_stats.mean;
         let nees_covered_run = nees_stats.covered;
@@ -55,49 +108,36 @@ impl SimRun {
             f64::NAN
         };
 
-        let rms_pos = if self.win_samples > 0.0 {
-            (self.win_pos_err2_acc / self.win_samples).sqrt()
-        } else {
-            0.0
-        };
-        let rms_vel = if self.win_samples > 0.0 {
-            (self.win_vel_err2_acc / self.win_samples).sqrt()
-        } else {
-            0.0
-        };
+        let rms_pos = rms_from_accumulator(self.pos_err2_acc, self.err_samples);
+        let rms_vel = rms_from_accumulator(self.vel_err2_acc, self.err_samples);
         let rms_att_deg = if self.err_samples > 0.0 {
             (self.att_err2_acc / self.err_samples).sqrt().to_degrees()
         } else {
-            0.0
+            f64::NAN
         };
 
-        let bg_rms_si = if self.win_samples > 0.0 {
-            (self.win_bg_err2_acc / self.win_samples).sqrt()
-        } else {
-            0.0
-        };
-        let ba_rms_si = if self.win_samples > 0.0 {
-            (self.win_ba_err2_acc / self.win_samples).sqrt()
-        } else {
-            0.0
-        };
+        let bg_rms_si = rms_from_accumulator(self.bg_err2_acc, self.err_samples);
+        let ba_rms_si = rms_from_accumulator(self.ba_err2_acc, self.err_samples);
         let bg_rms_dps = bg_rms_si.to_degrees();
         let ba_rms_ug = if ba_rms_si > 0.0 {
             ba_rms_si / 9.80665 * 1.0e6
         } else {
-            0.0
+            ba_rms_si
         };
+        let sm_rms_pos = rms_from_accumulator(self.sm_pos_err2_acc, self.sm_samples);
+        let sm_rms_vel = rms_from_accumulator(self.sm_vel_err2_acc, self.sm_samples);
 
-        let pass = rms_pos <= 40.0 / 3.0
-            && rms_vel <= 0.5 / 3.0
-            && rms_att_deg <= 0.05
-            && bg_rms_dps <= 0.005
-            && ba_rms_ug <= 120.0;
+        let pass = self.err_samples > 0.0
+            && self.pos_sigma3_max_m <= 40.0
+            && self.vel_sigma3_max_mps <= 0.5
+            && self.att_sigma3_max_deg <= 0.15
+            && self.bg_sigma3_max_dps <= 0.005
+            && self.ba_sigma3_max_ug <= 120.0;
 
         if std::env::var("TRACE").ok().is_some() {
             eprintln!(
-                "[WIN-SUMMARY] samples={} rms_pos={:.3} rms_vel={:.3}",
-                self.win_samples, rms_pos, rms_vel
+                "[WIN-SUMMARY] samples={} rms_pos={:.3} rms_vel={:.3} pos_3sigma_max={:.3} vel_3sigma_max={:.3}",
+                self.err_samples, rms_pos, rms_vel, self.pos_sigma3_max_m, self.vel_sigma3_max_mps
             );
         }
 
@@ -113,6 +153,11 @@ impl SimRun {
             rms_pos,
             rms_vel,
             rms_att_deg,
+            sigma3_pos_max_m: self.pos_sigma3_max_m,
+            sigma3_vel_max_mps: self.vel_sigma3_max_mps,
+            sigma3_att_max_deg: self.att_sigma3_max_deg,
+            sigma3_bg_max_dps: self.bg_sigma3_max_dps,
+            sigma3_ba_max_ug: self.ba_sigma3_max_ug,
             nees_mean,
             nis_mean,
             nees_covered: nees_covered_run,
@@ -155,11 +200,47 @@ impl SimRun {
             smoothed_rms_vel: sm_rms_vel,
             bias_bg_rms_dps: bg_rms_dps,
             bias_ba_rms_ug: ba_rms_ug,
+            history_snapshots: self.history_peak_snapshots,
+            history_events: self.history_peak_events,
+            history_props: self.history_peak_props,
+            history_capacity_bytes: self.history_peak_capacity_bytes,
             passed: pass,
         };
         let trace = self.blackout_trace.map(|t| t.finish());
         SimFinish { result, trace }
     }
+}
+
+fn in_recovery_window(t: f64, cfg: &SimConfig) -> bool {
+    t >= cfg.blackout_end - 1.0e-9 && t <= cfg.blackout_end + 2.0 + 1.0e-9
+}
+
+fn rms_from_accumulator(sum_sq: f64, samples: f64) -> f64 {
+    if samples > 0.0 {
+        (sum_sq / samples).sqrt()
+    } else {
+        f64::NAN
+    }
+}
+
+fn sigma3_norm_from_cov(cov: &Matrix3<f64>) -> f64 {
+    let trace = cov.trace().max(0.0);
+    3.0 * trace.sqrt()
+}
+
+fn truth_state_at_or_before<'a>(
+    truth_times: &[f64],
+    truth_hist: &'a [crate::types::State],
+    t_target: f64,
+) -> Option<&'a crate::types::State> {
+    let idx = truth_times
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, &ti)| ti <= t_target)
+        .map(|(i, _)| i)
+        .or_else(|| (!truth_hist.is_empty()).then_some(0))?;
+    truth_hist.get(idx)
 }
 
 fn phase_means_and_cov(sum: [f64; 4], ct: [usize; 4], hit: [usize; 4]) -> ([f64; 4], [f64; 4]) {
@@ -332,29 +413,4 @@ fn nees_3(err: &Vector3<f64>, p: &Matrix3<f64>) -> Option<f64> {
     let x = ch.solve(err);
     let v = err.dot(&x);
     v.is_finite().then_some(v)
-}
-
-fn smoother_metrics(
-    est: &Estimator,
-    cfg: &SimConfig,
-    truth_times: &[f64],
-    truth_hist: &[crate::types::State],
-) -> (f64, f64) {
-    let Some((xs, _ps)) = est.rts_smooth(2.0) else {
-        return (0.0, 0.0);
-    };
-    let target_t = (cfg.t_final - 2.0).max(0.0);
-    let idx = truth_times
-        .iter()
-        .enumerate()
-        .rev()
-        .find(|(_, &ti)| ti <= target_t)
-        .map(|(i, _)| i)
-        .unwrap_or(0);
-    let truth_at = truth_hist
-        .get(idx)
-        .unwrap_or_else(|| truth_hist.first().unwrap());
-    let pos_err_s = xs.r - truth_at.r;
-    let vel_err_s = xs.v - truth_at.v;
-    (pos_err_s.norm(), vel_err_s.norm())
 }

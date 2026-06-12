@@ -17,6 +17,13 @@ impl Estimator {
         } else {
             None
         };
+        let predicted_end_state = if self.seg_has_data {
+            // RTS needs the propagation prior at this timestamp after the update
+            // mutates `self.state`, so the pre-update state must be owned here.
+            Some(self.state.clone())
+        } else {
+            None
+        };
         if std::env::var("TRACE").ok().is_some() {
             eprintln!("[star] meas.t={:.3} state.t={:.3}", meas.t, self.state.t);
         }
@@ -90,7 +97,7 @@ impl Estimator {
         enforce_pd(&mut p_new);
         self.l_cov = chol_lower_with_enforce(p_new, "process_star");
 
-        self.maybe_checkpoint(true);
+        self.maybe_checkpoint_with_prediction(true, predicted_end_state);
         if record {
             self.history.push_event(Event::Star(meas));
         }

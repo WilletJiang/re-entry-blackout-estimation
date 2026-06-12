@@ -1,4 +1,8 @@
-use super::{math::qr_r_upper_in_place, Estimator, GnssMeas, Mat2NByN, MatN, RadarMeas, StarMeas};
+use super::{
+    history::{HistoryBuffer, PropRecord, Snapshot},
+    math::qr_r_upper_in_place,
+    Estimator, GnssMeas, Mat2NByN, MatN, RadarMeas, StarMeas,
+};
 use crate::types::{DynamicsParams, ImuSample, NoiseParams, STATE_DIM};
 use nalgebra::{linalg::Cholesky, Matrix3, Matrix6, UnitQuaternion, Vector3};
 use rand::rngs::StdRng;
@@ -257,6 +261,141 @@ fn time_update_sqrt_matches_dense_cov_update() {
         }
     }
     assert!(max_abs < 5.0e-8, "max_abs={:.3e}", max_abs);
+}
+
+#[test]
+fn process_noise_factor_avoids_artificial_bias_growth() {
+    let noise = NoiseParams::tuned();
+    let dyn_params = DynamicsParams::default();
+    let mut est = Estimator::new(noise, dyn_params, 10.0);
+    est.state.r = Vector3::new(est.dyn_params.radius_earth + 60_000.0, 0.0, 0.0);
+    est.state.v = Vector3::new(7_600.0, 0.0, 0.0);
+
+    let dt = 0.0025;
+    let steps = 8_000usize;
+    for k in 1..=steps {
+        let t = 0.0025 * f64::from(u32::try_from(k).expect("test step count fits in u32"));
+        est.propagate(ImuSample {
+            t,
+            dt,
+            accel_meas: Vector3::zeros(),
+            gyro_meas: Vector3::zeros(),
+            torque_cmd: Vector3::zeros(),
+            force_cmd: Vector3::zeros(),
+        });
+    }
+
+    let p = est.cov();
+    let bg_sigma_dps = p[(12, 12)].abs().sqrt().to_degrees();
+    let ba_sigma_ug = p[(15, 15)].abs().sqrt() / 9.80665 * 1.0e6;
+
+    assert!(
+        bg_sigma_dps < 0.01,
+        "gyro-bias sigma exploded: actual={bg_sigma_dps:.6} deg/s expected<0.01 deg/s"
+    );
+    assert!(
+        ba_sigma_ug < 1_000.0,
+        "accel-bias sigma exploded: actual={ba_sigma_ug:.3} ug expected<1000 ug"
+    );
+}
+
+#[test]
+fn rts_smoother_uses_predicted_next_state_not_filtered_next_state() {
+    let noise = NoiseParams::default();
+    let dyn_params = DynamicsParams::default();
+    let mut est = Estimator::new(noise, dyn_params, 1.0);
+
+    let l_cov = match Cholesky::new(MatN::identity()) {
+        Some(cholesky) => cholesky.l(),
+        None => panic!("failed to factor identity covariance in RTS regression setup"),
+    };
+
+    let mut snapshot_state_0 = crate::types::State::new();
+    snapshot_state_0.t = 0.0;
+    snapshot_state_0.r.x = 0.0;
+
+    let mut predicted_state_1 = crate::types::State::new();
+    predicted_state_1.t = 1.0;
+    predicted_state_1.r.x = 1.0;
+
+    let mut filtered_state_1 = crate::types::State::new();
+    filtered_state_1.t = 1.0;
+    filtered_state_1.r.x = 11.0;
+
+    let internal_0 = est.snapshot_internal();
+    let internal_1 = est.snapshot_internal();
+
+    let mut history = HistoryBuffer::new(1.0, 0.01);
+    history.push_snapshot(Snapshot {
+        state: snapshot_state_0,
+        l_cov,
+        internal: internal_0,
+    });
+    history.push_prop(PropRecord {
+        phi: MatN::identity(),
+        q: MatN::zeros(),
+        predicted_end_state: predicted_state_1,
+    });
+    history.push_snapshot(Snapshot {
+        state: filtered_state_1,
+        l_cov,
+        internal: internal_1,
+    });
+    est.history = history;
+
+    let smoothed = match est.rts_smooth(1.0) {
+        Some(output) => output,
+        None => panic!("RTS smoother unexpectedly returned None on a valid synthetic interval"),
+    };
+    let smoothed_state = smoothed.0;
+
+    assert!(
+        (smoothed_state.r.x - 10.0).abs() < 1.0e-9,
+        "RTS used the wrong next-state reference: actual={} expected=10.0",
+        smoothed_state.r.x
+    );
+}
+
+#[test]
+fn ten_second_history_stays_within_memory_budget() {
+    const MEMORY_BUDGET_BYTES: usize = 20 * 1024 * 1024;
+
+    let noise = NoiseParams::tuned();
+    let dyn_params = DynamicsParams::default();
+    let mut est = Estimator::new(noise, dyn_params, 10.0);
+    est.state.r = Vector3::new(est.dyn_params.radius_earth + 60_000.0, 0.0, 0.0);
+    est.state.v = Vector3::new(7_600.0, 0.0, 0.0);
+
+    let dt = 0.0025;
+    let gnss_cov = Matrix6::identity() * 4.0;
+    let steps = 10usize * 400usize;
+    for k in 1..=steps {
+        let t = dt * f64::from(u32::try_from(k).expect("test step count fits in u32"));
+        est.propagate(ImuSample {
+            t,
+            dt,
+            accel_meas: Vector3::zeros(),
+            gyro_meas: Vector3::zeros(),
+            torque_cmd: Vector3::zeros(),
+            force_cmd: Vector3::zeros(),
+        });
+        if k % 40 == 1 {
+            est.update_gnss(GnssMeas {
+                t,
+                pos: est.state.r,
+                vel: est.state.v,
+                r_cov: gnss_cov,
+            });
+        }
+    }
+
+    let health = est.health();
+    assert!(
+        health.history_capacity_bytes < MEMORY_BUDGET_BYTES,
+        "history memory exceeded budget: actual={} bytes expected<{} bytes",
+        health.history_capacity_bytes,
+        MEMORY_BUDGET_BYTES
+    );
 }
 
 fn make_raw_gps_meas(r_user: Vector3<f64>, v_user: Vector3<f64>, t: f64) -> super::GpsRawMeas {

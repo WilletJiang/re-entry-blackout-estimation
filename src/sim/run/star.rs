@@ -3,17 +3,27 @@ use nalgebra::{Matrix3, UnitQuaternion, Vector3};
 use rand::Rng;
 use rand_distr::Distribution;
 
+const STAR_BLACKOUT_DELAY_START_SEC: f64 = 10.0;
+const STAR_BLACKOUT_DELAY_END_SEC: f64 = 30.0;
+
 impl SimRun {
     pub(super) fn maybe_star(&mut self, t: f64) {
         if self.no_star || t < self.next_star {
             return;
         }
         self.next_star += 1.0 / self.cfg.star_rate;
-        if (t >= 130.0 && t <= 150.0) || self.rng.gen_range(0.0..1.0) <= self.cfg.dropout_rate {
+        let star_blackout_start = self.cfg.blackout_start + STAR_BLACKOUT_DELAY_START_SEC;
+        let star_blackout_end = self.cfg.blackout_start + STAR_BLACKOUT_DELAY_END_SEC;
+        if (t >= star_blackout_start && t <= star_blackout_end)
+            || self.rng.gen_range(0.0..1.0) <= self.cfg.dropout_rate
+        {
             return;
         }
         let star_delay = 0.12;
         let meas_time = t - star_delay;
+        if meas_time < 0.0 {
+            return;
+        }
         let q_true_at_meas =
             metrics::find_truth_q_at(&self.truth_times, &self.truth_hist, meas_time)
                 .unwrap_or(self.truth.q);

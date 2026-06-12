@@ -171,11 +171,14 @@ struct SimRun {
     err_samples: f64,
     bg_err2_acc: f64,
     ba_err2_acc: f64,
-    win_pos_err2_acc: f64,
-    win_vel_err2_acc: f64,
-    win_bg_err2_acc: f64,
-    win_ba_err2_acc: f64,
-    win_samples: f64,
+    pos_sigma3_max_m: f64,
+    vel_sigma3_max_mps: f64,
+    att_sigma3_max_deg: f64,
+    bg_sigma3_max_dps: f64,
+    ba_sigma3_max_ug: f64,
+    sm_pos_err2_acc: f64,
+    sm_vel_err2_acc: f64,
+    sm_samples: f64,
     nees_samples: Vec<metrics::NeesSample>,
     truth_times: Vec<f64>,
     truth_hist: Vec<State>,
@@ -192,6 +195,10 @@ struct SimRun {
     phi_t_const: f64,
     inertia_inv: Matrix3<f64>,
     total_steps: usize,
+    history_peak_snapshots: usize,
+    history_peak_events: usize,
+    history_peak_props: usize,
+    history_peak_capacity_bytes: usize,
     blackout_trace: Option<trace::TraceRecorder>,
 }
 
@@ -210,7 +217,7 @@ impl SimRun {
         let trace = std::env::var("TRACE").ok().is_some();
         let no_star = std::env::var("NO_STAR").ok().is_some();
 
-        let mut est = Estimator::new(noise.clone(), dyn_params.clone(), 6.0);
+        let mut est = Estimator::new(noise.clone(), dyn_params.clone(), cfg.history_sec);
         est.set_aero_table_shared(aero.clone());
         if let Some(blk_f) = noise.aero_force_rw_blackout {
             est.set_blackout_residual(
@@ -235,6 +242,7 @@ impl SimRun {
 
         let truth = init::init_truth_state(&dyn_params, &standard_normal, &mut rng);
         init::init_est_state(&mut est, &truth, &standard_normal, &mut rng);
+        let initial_health = est.health();
 
         let bias_jump = cfg.bias_jump;
         let (bias_jump_bg, bias_jump_ba) = bias_jump_vectors(bias_jump, &standard_normal, &mut rng);
@@ -281,11 +289,14 @@ impl SimRun {
             err_samples: 0.0,
             bg_err2_acc: 0.0,
             ba_err2_acc: 0.0,
-            win_pos_err2_acc: 0.0,
-            win_vel_err2_acc: 0.0,
-            win_bg_err2_acc: 0.0,
-            win_ba_err2_acc: 0.0,
-            win_samples: 0.0,
+            pos_sigma3_max_m: 0.0,
+            vel_sigma3_max_mps: 0.0,
+            att_sigma3_max_deg: 0.0,
+            bg_sigma3_max_dps: 0.0,
+            ba_sigma3_max_ug: 0.0,
+            sm_pos_err2_acc: 0.0,
+            sm_vel_err2_acc: 0.0,
+            sm_samples: 0.0,
             nees_samples: Vec::with_capacity(nees_cap),
             truth_times: Vec::with_capacity(total_steps + 1),
             truth_hist: Vec::with_capacity(total_steps + 1),
@@ -302,6 +313,10 @@ impl SimRun {
             phi_t_const,
             inertia_inv,
             total_steps,
+            history_peak_snapshots: initial_health.history_snapshots,
+            history_peak_events: initial_health.history_events,
+            history_peak_props: initial_health.history_props,
+            history_peak_capacity_bytes: initial_health.history_capacity_bytes,
             blackout_trace,
         }
     }
@@ -336,7 +351,9 @@ impl SimRun {
         self.maybe_gnss(t);
         self.maybe_star(t);
         self.maybe_radar(t);
-        self.accumulate_recovery_errors(t, step);
+        self.accumulate_recovery_window_stats(step);
+        self.accumulate_smoothed_recovery_window_stats();
+        self.record_health_peak();
         self.maybe_record_trace(step);
     }
 

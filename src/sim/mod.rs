@@ -9,6 +9,7 @@ pub use run::{run_monte_carlo_with_trace, simulate_single_with_trace, MonteCarlo
 pub struct SimConfig {
     pub dt: f64,
     pub t_final: f64,
+    pub history_sec: f64,
     pub blackout_start: f64,
     pub blackout_end: f64,
     pub gnss_rate: f64,
@@ -46,7 +47,9 @@ impl BlackoutTraceConfig {
 
 pub struct BlackoutTrace {
     pub pos_err_m: Vec<f32>,
+    pub vel_err_mps: Vec<f32>,
     pub pos_sigma3_m: Vec<f32>,
+    pub vel_sigma3_mps: Vec<f32>,
     pub nees_rv: Vec<f32>,
 }
 
@@ -55,6 +58,7 @@ impl Default for SimConfig {
         SimConfig {
             dt: 0.0025,
             t_final: 180.0,
+            history_sec: 10.0,
             blackout_start: 120.0,
             blackout_end: 160.0,
             gnss_rate: 10.0,
@@ -94,6 +98,11 @@ pub struct MonteCarloResult {
     pub rms_pos: f64,
     pub rms_vel: f64,
     pub rms_att_deg: f64,
+    pub sigma3_pos_max_m: f64,
+    pub sigma3_vel_max_mps: f64,
+    pub sigma3_att_max_deg: f64,
+    pub sigma3_bg_max_dps: f64,
+    pub sigma3_ba_max_ug: f64,
     pub nees_mean: f64,
     pub nis_mean: f64,
     pub nees_covered: f64,
@@ -128,5 +137,9 @@ pub struct MonteCarloResult {
     pub smoothed_rms_vel: f64,
     pub bias_bg_rms_dps: f64,
     pub bias_ba_rms_ug: f64,
+    pub history_snapshots: usize,
+    pub history_events: usize,
+    pub history_props: usize,
+    pub history_capacity_bytes: usize,
     pub passed: bool,
 }

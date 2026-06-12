@@ -14,7 +14,7 @@ An estimator instance is created with the standard constructor shown below.
 let mut est = Estimator::new(noise, dyn_params, history_sec);
 ```
 
-`history_sec` sets the fixed lag horizon and should be chosen long enough to cover the maximum expected delay together with the smoothing window. Optional runtime configuration is then applied through the existing setter methods. The most relevant controls are `set_blackout_residual`, `set_precalibration`, `set_robust_tuning`, `enable_iae`, `disable_iae`, `enable_aero_learning`, and `disable_aero_learning`. These calls modify estimator behaviour prospectively. They do not retroactively alter the already recorded history.
+`history_sec` sets the fixed lag horizon and should be chosen long enough to cover the maximum expected delay together with the smoothing window. For the task in `tasks.md`, the diagnostics harness uses ten seconds by default so that delayed measurement handling, smoothing, and memory accounting are evaluated on the required horizon. Optional runtime configuration is then applied through the existing setter methods. The most relevant controls are `set_blackout_residual`, `set_precalibration`, `set_robust_tuning`, `enable_iae`, `disable_iae`, `enable_aero_learning`, and `disable_aero_learning`. These calls modify estimator behaviour prospectively. They do not retroactively alter the already recorded history.
 
 ## Main Loop Contract
 
@@ -72,6 +72,6 @@ Some supervisory actions change state or covariance in ways that must survive hi
 
 ## Health Reporting
 
-`Estimator::health()` exposes the most useful operational counters. It reports the last GNSS NIS value and accept decision, the recent GNSS rejection streak, and the approximate history buffer usage in bytes. This interface serves runtime monitoring and does not alter the estimation state.
+`Estimator::health()` exposes the most useful operational counters. It reports the last GNSS NIS value and accept decision, the recent GNSS rejection streak, and the approximate history buffer usage in bytes. This interface serves runtime monitoring and does not alter the estimation state. The diagnostics harness records the peak history counters and memory estimate from this interface into its summary outputs.
 
 The integration rule is therefore simple. Propagate strictly in time, submit every measurement with its physical timestamp, and route any externally imposed covariance or bias intervention through a replay safe API. If those three conditions are met, the estimator can preserve both fixed lag smoothing and delayed measurement consistency without any special handling in the caller.

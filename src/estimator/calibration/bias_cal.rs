@@ -89,9 +89,9 @@ impl Estimator {
 
         let is_pvt = self.bias_cal.from_pvt;
         let sigma_ba = if is_pvt {
-            300e-6_f64 * 9.80665
+            150e-6_f64 * 9.80665
         } else {
-            2_000e-6_f64 * 9.80665
+            300e-6_f64 * 9.80665
         };
         if sigma_ba.is_finite() && sigma_ba > 0.0 {
             let lambda_ba = 1.0 / (sigma_ba * sigma_ba);
@@ -126,6 +126,7 @@ impl Estimator {
             return false;
         };
         let theta = chol.solve(&self.bias_cal.normal_b);
+        let ba_post_cov = chol.inverse().fixed_view::<3, 3>(6, 6).into_owned();
         let mut delta = theta.fixed_rows::<3>(6).into_owned();
         let max_norm = if is_pvt {
             400e-6_f64 * 9.80665
@@ -138,6 +139,7 @@ impl Estimator {
         }
 
         self.state.ba += delta;
+        self.apply_bias_calibration_covariance(ba_post_cov);
         self.bias_cal.enabled = false;
         self.bias_cal.reset_interval();
         true
@@ -145,10 +147,35 @@ impl Estimator {
 
     pub fn apply_bias_calibration_record(&mut self) -> bool {
         let t = self.state.t;
+        let predicted_end_state = if self.seg_has_data {
+            // RTS needs the propagation prior at this timestamp after the
+            // calibration mutates `self.state`.
+            Some(self.state.clone())
+        } else {
+            None
+        };
         let applied = self.apply_bias_calibration();
-        self.maybe_checkpoint(true);
+        self.maybe_checkpoint_with_prediction(true, predicted_end_state);
         self.history.push_event(Event::BiasCalApply { t });
         applied
+    }
+
+    fn apply_bias_calibration_covariance(&mut self, ba_post_cov: Matrix3<f64>) {
+        let mut p = self.cov();
+        for row in 0..3 {
+            let state_row = 15 + row;
+            for col in 0..24 {
+                p[(state_row, col)] = 0.0;
+                p[(col, state_row)] = 0.0;
+            }
+        }
+        for row in 0..3 {
+            for col in 0..3 {
+                p[(15 + row, 15 + col)] = ba_post_cov[(row, col)];
+            }
+        }
+        crate::util::enforce_pd(&mut p);
+        self.l_cov = super::math::chol_lower_with_enforce(p, "apply_bias_calibration_covariance");
     }
 
     #[inline]
@@ -303,7 +330,7 @@ pub(super) fn initial_cov() -> MatN {
     for i in 9..12 {
         p[(i, i)] = omg_var;
     }
-    let bg_var = (3.0_f64.to_radians() / 3600.0).powi(2);
+    let bg_var = (0.3_f64.to_radians() / 3600.0).powi(2);
     for i in 12..15 {
         p[(i, i)] = bg_var;
     }

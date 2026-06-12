@@ -2,6 +2,8 @@ use super::SimRun;
 use rand::Rng;
 use rand_distr::{Cauchy, Distribution};
 
+const RADAR_OUTLIER_SCALE_M: f64 = 10.0;
+
 impl SimRun {
     pub(super) fn maybe_radar(&mut self, t: f64) {
         if t < self.next_radar {
@@ -10,6 +12,9 @@ impl SimRun {
         self.next_radar += 1.0 / self.cfg.radar_rate;
         let radar_delay = 0.07;
         let meas_time = t - radar_delay;
+        if meas_time < 0.0 {
+            return;
+        }
         let alt_true = truth_alt_at(
             &self.truth_times,
             &self.truth_hist,
@@ -24,7 +29,8 @@ impl SimRun {
         }
         let alt_meas = alt_true
             + if self.rng.gen_range(0.0..1.0) < self.cfg.outlier_rate {
-                Cauchy::new(0.0, 10.0).unwrap().sample(&mut self.rng)
+                cauchy_with_scale(RADAR_OUTLIER_SCALE_M, "radar altitude outlier scale")
+                    .sample(&mut self.rng)
             } else {
                 1.0 * self.standard_normal.sample(&mut self.rng)
             };
@@ -33,6 +39,15 @@ impl SimRun {
             alt: alt_meas,
             sigma: 1.0,
         });
+    }
+}
+
+fn cauchy_with_scale(scale: f64, label: &str) -> Cauchy<f64> {
+    match Cauchy::new(0.0, scale) {
+        Ok(dist) => dist,
+        Err(err) => {
+            panic!("{label} must be finite and > 0; got scale={scale}: {err}");
+        }
     }
 }
 

@@ -28,7 +28,7 @@
 \makeatother
 
 \abstract{
-This report presents the current design and validation status of the SE-2317 entry blackout estimator. The implementation is a tightly-coupled Square-Root Error-State Kalman Filter with a fixed-lag history buffer for delayed and out-of-order measurements, replay-safe raw GNSS updates, configurable $\chi^2$ gating, covariance inflation, optional innovation-based adaptive estimation, and pre-blackout accelerometer-bias calibration. The report summarizes the state model, observability considerations, delay handling method, numerical formulation, and Monte Carlo evidence carried by the repository. The current verified record dated 2026-03-11 reports a \textbf{100.0\% pass rate} in tight-coupled mode over 500 Monte Carlo runs, with an additional quick regression at \textbf{100/100} in tight mode and \textbf{96/100} in PVT mode.
+This report presents the design and validation baseline of the SE-2317 entry blackout estimator. The implementation is a tightly-coupled Square-Root Error-State Kalman Filter with a fixed-lag history buffer for delayed and out-of-order measurements, replay-safe raw GNSS updates, configurable $\chi^2$ gating, covariance inflation, optional innovation-based adaptive estimation, and pre-blackout accelerometer-bias calibration. The report summarizes the state model, observability considerations, delay handling method, numerical formulation, and Monte Carlo evidence carried by the repository. The March 11, 2026 benchmark numbers remain useful as a historical baseline, but they predate the current acceptance alignment and summary schema in the repository.
 }
 
 \begin{document}
@@ -49,6 +49,7 @@ This report presents the current design and validation status of the SE-2317 ent
   \midrule
   A & 2026-03-11 & Gao Jiang & Initial report synchronized to the current estimator implementation and validation flow. \\
   B & 2026-05-09 & Gao Jiang & Narrative, requirements wording, and validation summary aligned with the repository documentation set. \\
+  C & 2026-06-13 & Gao Jiang & Recovery-window reacquisition behavior, tight-coupling phase logic, and current quick-regression status synchronized to the repository state. \\
   \bottomrule
 \end{tabular}
 
@@ -63,14 +64,13 @@ Truth propagation and filter-side nominal linearization call the same aerodynami
 The state integrator continues to use de-biased IMU specific force directly.
 
 \paragraph{Timing and robustness summary.}
-Delayed and out-of-order measurements are handled by a fixed-lag history buffer with rewind--update--replay semantics covering GNSS PVT, raw GNSS, star tracker, and radar. The robustness layer combines $\chi^2$ gating, Student-t-style covariance inflation, replay-safe IAE scaling, and pseudorange down-weighting for heavy-tailed residuals. Phase-dependent process-noise scaling and blackout-specific aerodynamic residual excitation are used to keep covariance realistic across mission phases. A pre-blackout accelerometer-bias calibration step is applied at blackout entry.
+Delayed and out-of-order measurements are handled by a fixed-lag history buffer with rewind--update--replay semantics covering GNSS PVT, raw GNSS, star tracker, and radar. The robustness layer combines $\chi^2$ gating, Student-t-style covariance inflation, replay-safe IAE scaling, and pseudorange down-weighting for heavy-tailed residuals. Phase-dependent process-noise scaling and blackout-specific aerodynamic residual excitation are used to keep covariance realistic across mission phases. At blackout exit, the PVT path applies an immediate reacquisition update at the exit timestamp and uses the same velocity covariance as ordinary PVT tracking. In the tight-coupled path, the weakest-direction Doppler projection is confined to the two-second recovery interval after blackout exit, which preserves pre-blackout observability while still protecting the reacquisition segment against temporary geometry degradation. A pre-blackout accelerometer-bias calibration step is applied at blackout entry.
 
 \paragraph{Validation summary.}
-The current verified release record dated 2026-03-11 reports a tight-coupled GNSS pass rate of
+The historical release record dated 2026-03-11 reports a tight-coupled GNSS pass rate of
 \textbf{100.0\%} (500/500) under 5\% heavy-tail outliers and 20\% dropout.
 The corresponding PVT baseline pass rate is \textbf{97.0\%} (485/500).
-The same code line also passes a 100-run quick regression at \textbf{100/100} in tight mode
-and \textbf{96/100} in PVT mode.
+On the current code line, a release quick regression dated 2026-06-13 passes \textbf{10/10} in both modes. In that run, the recovery-window velocity three-sigma maximum is \SI{0.4157}{m/s} in PVT and \SI{0.1044}{m/s} in tight coupling. These numbers verify the present recovery-window fixes. A fresh long campaign is still required before promoting the current state to a new canonical validation record under the aligned acceptance logic.
 
 \section{Problem Setting and Requirements}
 The mission context is a 6-DOF rigid-body entry with strong aero nonlinearity and a GNSS blackout.
@@ -204,11 +204,7 @@ Entry dynamics provide such excitation, but only sensors that constrain $\delta 
 \subsection{Blackout implication and design response}
 During blackout, GNSS-derived constraints are absent; the bias sub-system loses direct observability, and
 any bias correction must come from (i) pre-blackout information, (ii) post-blackout reacquisition, and (iii) conservative covariance growth.
-The implementation therefore adopts two design decisions:
-\begin{enumerate}
-  \item \textbf{Pre-blackout bias calibration} to reduce bias uncertainty before observability is lost.
-  \item \textbf{Blackout covariance realism} via increased $Q$ (and aero residual OU excitation) to prevent ``too-certain'' predictions.
-\end{enumerate}
+The implementation therefore adopts two linked measures. A dedicated pre-blackout bias calibration reduces bias uncertainty before observability is lost. In parallel, blackout covariance realism is enforced through increased $Q$ and stronger OU excitation in the aerodynamic residual states, so the filter does not carry an unrealistically tight prior into the recovery segment.
 
 \subsection{Pre-blackout accelerometer-bias calibration as MAP least squares}
 We treat a short pre-blackout interval as a dedicated calibration window.
@@ -261,19 +257,7 @@ Applying the Kalman update on $\tilde x$ yields the optimal posterior over $x(t_
 This corresponds to the usual stochastic-cloning fixed-lag smoothing construction.
 
 \subsection{Implementation: rewind--update--replay (fixed horizon)}
-Instead of explicitly augmenting the state, we maintain a fixed-lag buffer of:
-\begin{itemize}
-  \item snapshots $(\hat x_k, L_k)$ at a coarse cadence (e.g., \SI{100}{Hz}),
-  \item event log of all updates (IMU, GNSS, star, radar),
-  \item propagation records $(\Phi_k,Q_k)$ for RTS smoothing and replay.
-\end{itemize}
-On receiving a measurement with timestamp $t_z < t_{\text{now}}$:
-\begin{enumerate}
-  \item restore the latest snapshot at $t_s\le t_z$;
-  \item replay logged events from $(t_s,t_z]$ to reconstruct $\hat x(t_z)$;
-  \item apply the measurement update at $t_z$;
-  \item replay the remaining events $(t_z,t_{\text{now}}]$ to return to ``now''.
-\end{enumerate}
+Instead of explicitly augmenting the state, we maintain a fixed-lag buffer containing snapshots $(\hat x_k, L_k)$ at a coarse cadence such as \SI{100}{Hz}, a complete event log for IMU and all measurement updates, and propagation records $(\Phi_k,Q_k)$ used by both RTS smoothing and replay. When a measurement arrives with timestamp $t_z < t_{\text{now}}$, the estimator restores the latest snapshot at $t_s\le t_z$, replays the logged events over $(t_s,t_z]$ to reconstruct $\hat x(t_z)$, applies the update at $t_z$, and then replays the remaining events over $(t_z,t_{\text{now}}]$ to return to the current state.
 
 \paragraph{Correctness statement (linear case).}
 For linear-Gaussian models with deterministic replay of the same event sequence,
@@ -320,20 +304,11 @@ large residuals receive reduced weight without forcing hard rejection.
 
 \subsection{Runtime robust tuning}
 The repository also exposes a runtime robustness surface used by the sweep harness:
-\begin{itemize}
-  \item \texttt{gate\_p} adjusts the effective $\chi^2$ gate level;
-  \item \texttt{student\_nu} enables Student-t-style covariance inflation;
-  \item \texttt{r\_scale\_cap} bounds covariance inflation;
-  \item \texttt{iae\_gamma} enables replay-safe innovation-based adaptive estimation (IAE).
-\end{itemize}
+`\texttt{gate\_p}` adjusts the effective $\chi^2$ gate level, `\texttt{student\_nu}` enables Student-t-style covariance inflation, `\texttt{r\_scale\_cap}` bounds covariance inflation, and `\texttt{iae\_gamma}` enables replay-safe innovation-based adaptive estimation. Together these parameters define the tuning surface used by the sweep harness.
 The adaptive state is stored inside the fixed-lag snapshots so rewind/replay remains deterministic.
 
 \subsection[Consistency enforcement: phase-dependent Q]{Consistency enforcement: phase-dependent $Q$ and covariance inflation}
-Two mechanisms address non-stationary model errors inherent to entry dynamics:
-\begin{enumerate}
-  \item \textbf{Phase-dependent} process-noise scaling ($Q$ inflation) pre/blackout/post, and blackout-specific OU excitation for aero residuals.
-  \item \textbf{Innovation-triggered covariance inflation} on repeated GNSS gate failures (a guarded ``reset'' of RV covariance).
-\end{enumerate}
+Two mechanisms address the non-stationary model errors inherent to entry dynamics. The first is phase-dependent process-noise scaling, together with blackout-specific OU excitation for the aerodynamic residual states. The second is innovation-triggered covariance inflation after repeated GNSS gate failures, which acts as a guarded reset of the RV covariance.
 Mathematically, both increase $P$ in regimes where NEES indicates under-dispersion, pushing $\E[\mathrm{NEES}]$ back toward the DOF.
 
 \section{Numerical Stability: Square-Root Formulation}
@@ -394,15 +369,7 @@ These benchmarks establish a substantial margin against the \SI{5}{ms} cycle bud
 
 \section{Monte Carlo Verification and Results}
 \subsection{Fault injection matrix (harness)}
-The harness simulates:
-\begin{itemize}
-  \item \textbf{GNSS blackout:} no GNSS in $[120,160]\,\si{s}$.
-  \item \textbf{Dropout:} independent Bernoulli dropout with $p=0.20$ on applicable sensors.
-  \item \textbf{Outliers:} 5\% heavy-tail injection (Cauchy) on GNSS position/pseudorange and radar altitude.
-  \item \textbf{Delay/out-of-order:} star tracker timestamp $t-\SI{0.12}{s}$ and radar timestamp $t-\SI{0.07}{s}$; raw GPS updates are also replay-safe if delivered late.
-  \item \textbf{Bias jump (fault mode):} step change in truth IMU bias (gyro + accel) at $t=\SI{140}{s}$ with random direction; enabled via \texttt{BIAS\_JUMP=1}.
-  \item \textbf{RCS pulses:} deterministic pulse train from the provided actuator series, composed through the same nominal dynamics helper on the truth and filter sides.
-\end{itemize}
+The harness simulates the full blackout mission environment. GNSS is removed over $[120,160]\,\si{s}$. Applicable sensors are subject to independent Bernoulli dropout with $p=0.20$. Heavy-tailed outliers are injected at a five percent rate on GNSS position, raw pseudorange, and radar altitude. The delayed measurement model uses a star-tracker timestamp of $t-\SI{0.12}{s}$ and a radar timestamp of $t-\SI{0.07}{s}$, while raw GPS packets remain replay-safe if delivered late. A fault mode enabled through \texttt{BIAS\_JUMP=1} imposes a step change in truth IMU bias at $t=\SI{140}{s}$ with random direction. The truth and filter paths also share the same deterministic RCS pulse train through the common nominal dynamics helper.
 
 \subsection{Metrics}
 We evaluate on the post-blackout acceptance window $[t_{\text{exit}},t_{\text{exit}}+2]$:
@@ -410,19 +377,19 @@ RMS position, velocity, attitude error, and bias RMS (converted to \si{\micro g}
 We report per-run NEES/NIS means and their 95\% coverage rates, plus phase-split NEES/NIS (pre/blackout/post/tail)
 to localize inconsistency to specific mission regimes.
 
-\subsection{Current quick regression (2026-03-11, 100 runs)}
+\subsection{Current quick regression (2026-06-13, 10 runs)}
 \begin{center}
-\begin{tabular}{lrrr}
+\begin{tabular}{lrrrr}
 \toprule
-Mode & Pass rate & Mean NEES & Mean NIS \\
+Mode & Pass rate & Max vel $3\sigma$ [m/s] & Mean NEES & Mean NIS \\
 \midrule
-PVT baseline  & 96.0\%  & 18.54 & 5.25 \\
-Tight-coupled & 100.0\% & 4.66 & 10.42 \\
+PVT baseline  & 100.0\% & 0.4157 & 4.80 & 5.89 \\
+Tight-coupled & 100.0\% & 0.1044 & 4.82 & 11.69 \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\subsection{Current Monte Carlo summary (500 runs)}
+\subsection{Historical Monte Carlo summary (2026-03-11, 500 runs)}
 \begin{center}
 \begin{tabular}{lrrrr}
 \toprule
@@ -435,11 +402,10 @@ Tight-coupled & 100.0\% & 1.93 & 0.026 & 4.89 / 0.948 \\
 \end{center}
 
 \paragraph{Interpretation.}
-The tight-coupled configuration removes the rare catastrophic RV inconsistency events seen in the PVT baseline.
-The PVT baseline exhibits a heavy-tailed NEES distribution with 95th percentile $\approx 7.14$
+The historical 500-run record showed that tight coupling removed the rare catastrophic RV inconsistency events seen in the older PVT baseline.
+That baseline exhibited a heavy-tailed NEES distribution with 95th percentile $\approx 7.14$
 and maximum $\approx 3.18\times 10^4$.
-This pattern indicates occasional severe model mismatch or update corruption.
-The tight-coupled path suppresses these cases through geometry control, gating, and robustification.
+The current repository state no longer reproduces those earlier acceptance failures in the quick regression above, but a fresh long campaign is still required before replacing the historical table with a new canonical Monte Carlo record.
 
 \subsection{Plots}
 \begin{figure}[h]
@@ -491,19 +457,10 @@ The tight-coupled path suppresses these cases through geometry control, gating, 
 \end{figure}
 
 \section{Traceability to Implementation}
-The report corresponds to the following code modules:
-\begin{itemize}
-  \item Propagation + SR time update: \texttt{src/estimator/filter/propagate.rs}.
-  \item Process noise and phase scaling: \texttt{src/estimator/support/noise.rs}, \texttt{src/types.rs}.
-  \item Delays/out-of-order rewind--replay: \texttt{src/estimator/history/rewind.rs}.
-  \item GNSS PVT update + gating + inflation: \texttt{src/estimator/update/gnss.rs}.
-  \item Tight-coupled raw GNSS + robust pseudorange: \texttt{src/estimator/update/gps\_raw.rs}.
-  \item Fixed-lag RTS smoother: \texttt{src/estimator/filter/rts.rs}.
-  \item Harness + plots + exported artifacts: \texttt{src/bin/harness.rs}, \texttt{src/plot.rs}.
-\end{itemize}
+The report maps directly onto the code base. Propagation and square-root time update are implemented in \texttt{src/estimator/filter/propagate.rs}. Process-noise construction and phase scaling are defined in \texttt{src/estimator/support/noise.rs} and \texttt{src/types.rs}. Delayed measurement rewind and replay are handled in \texttt{src/estimator/history/rewind.rs}. GNSS PVT update logic, including gating and covariance inflation, resides in \texttt{src/estimator/update/gnss.rs}. Tight-coupled raw GNSS processing, including robust pseudorange handling, resides in \texttt{src/estimator/update/gps\_raw.rs}. The fixed-lag RTS smoother is implemented in \texttt{src/estimator/filter/rts.rs}. Benchmark execution, plotting, and exported diagnostics are driven by \texttt{src/bin/harness.rs} and \texttt{src/plot.rs}.
 
 \section{Conclusion}
-The current repository implements a tight-coupled square-root error-state EKF with delay-aware rewind--update--replay, fixed-lag smoothing, phase-dependent covariance control, and pre-blackout bias calibration. The verified record dated 2026-03-11 shows a 100.0\% pass rate in the 500-run tight-coupled Monte Carlo campaign and a 97.0\% pass rate in the PVT baseline under the prescribed blackout, dropout, and outlier conditions.
+The current repository implements a tight-coupled square-root error-state EKF with delay-aware rewind--update--replay, fixed-lag smoothing, phase-dependent covariance control, and pre-blackout bias calibration. The March 11, 2026 benchmark record remains a useful historical baseline, showing a 100.0\% pass rate in the 500-run tight-coupled Monte Carlo campaign and a 97.0\% pass rate in the PVT baseline under the prescribed blackout, dropout, and outlier conditions. A fresh full campaign is required to claim a current validated record under the aligned acceptance logic.
 
 The remaining work is well bounded. The most useful next steps are tighter per-phase consistency control, especially during blackout where NEES remains conservative, and explicit bias step-fault campaigns to complete the fault-injection matrix.
 

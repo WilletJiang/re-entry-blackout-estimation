@@ -83,4 +83,45 @@ impl Estimator {
         }
         q
     }
+
+    pub(super) fn process_noise_factor(&self, q: &MatN) -> MatN {
+        let mut lq = MatN::zeros();
+
+        for axis in 0..3 {
+            let pos_idx = axis;
+            let vel_idx = axis + 3;
+            let q_rr = q[(pos_idx, pos_idx)].max(0.0);
+            let q_rv = q[(vel_idx, pos_idx)];
+            let q_vv = q[(vel_idx, vel_idx)].max(0.0);
+
+            if q_rr > 0.0 {
+                let l11 = q_rr.sqrt();
+                let l21 = q_rv / l11;
+                let l22_sq = (q_vv - l21 * l21).max(0.0);
+                lq[(pos_idx, pos_idx)] = l11;
+                lq[(vel_idx, pos_idx)] = l21;
+                lq[(vel_idx, vel_idx)] = l22_sq.sqrt();
+            } else {
+                lq[(vel_idx, vel_idx)] = q_vv.sqrt();
+            }
+        }
+
+        for diag_idx in 6..9 {
+            lq[(diag_idx, diag_idx)] = q[(diag_idx, diag_idx)].max(0.0).sqrt();
+        }
+        for diag_idx in 12..15 {
+            lq[(diag_idx, diag_idx)] = q[(diag_idx, diag_idx)].max(0.0).sqrt();
+        }
+        for diag_idx in 15..18 {
+            lq[(diag_idx, diag_idx)] = q[(diag_idx, diag_idx)].max(0.0).sqrt();
+        }
+        for diag_idx in 18..21 {
+            lq[(diag_idx, diag_idx)] = q[(diag_idx, diag_idx)].max(0.0).sqrt();
+        }
+        for diag_idx in 21..24 {
+            lq[(diag_idx, diag_idx)] = q[(diag_idx, diag_idx)].max(0.0).sqrt();
+        }
+
+        lq
+    }
 }

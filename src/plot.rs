@@ -14,7 +14,7 @@ pub fn plot_nees_nis(results: &[MonteCarloResult], path: &str) -> anyhow::Result
         .fold(0.0f64, f64::max)
         .max(15.0);
     let mut chart = ChartBuilder::on(&root)
-        .caption("NEES/NIS per run", ("sans-serif", 24))
+        .caption("Per-run NEES/NIS means", ("sans-serif", 24))
         .margin(15)
         .x_label_area_size(35)
         .y_label_area_size(50)
@@ -24,15 +24,6 @@ pub fn plot_nees_nis(results: &[MonteCarloResult], path: &str) -> anyhow::Result
         .x_desc("run")
         .y_desc("value")
         .draw()?;
-    // 95% chi2 lines for dof 6 and 3
-    chart.draw_series(std::iter::once(PathElement::new(
-        vec![(0.0, 12.592), (max_run, 12.592)],
-        &BLUE.mix(0.3),
-    )))?;
-    chart.draw_series(std::iter::once(PathElement::new(
-        vec![(0.0, 7.815), (max_run, 7.815)],
-        &RED.mix(0.3),
-    )))?;
     chart
         .draw_series(LineSeries::new(
             results
@@ -75,7 +66,7 @@ pub fn plot_histogram(results: &[MonteCarloResult], path: &str) -> anyhow::Resul
     let y_max = counts.iter().cloned().max().unwrap_or(1) + 1;
     let mut chart = ChartBuilder::on(&root)
         .caption(
-            "RMS Position Error Histogram (3σ≤40 m target)",
+            "Recovery-window RMS position error histogram",
             ("sans-serif", 24),
         )
         .margin(15)
@@ -87,12 +78,6 @@ pub fn plot_histogram(results: &[MonteCarloResult], path: &str) -> anyhow::Resul
         .x_desc("RMS pos (m)")
         .y_desc("count")
         .draw()?;
-    // acceptance line at 40/3 ≈ 13.33 m (RMS corresponding to 3σ 40 m)
-    let accept = 40.0 / 3.0;
-    chart.draw_series(std::iter::once(PathElement::new(
-        vec![(accept, 0u32), (accept, y_max as u32)],
-        &BLUE.mix(0.4),
-    )))?;
     chart.draw_series((0..bins).map(|i| {
         let x0 = i as f64 * bin_w;
         let x1 = x0 + bin_w;
@@ -124,7 +109,7 @@ pub fn plot_bias_histograms(
         let y_max = counts.iter().cloned().max().unwrap_or(1) + 1;
         let mut chart = ChartBuilder::on(&root)
             .caption(
-                "Gyro bias RMS (deg/s) histogram (≤0.005 target)",
+                "Recovery-window gyro bias RMS histogram",
                 ("sans-serif", 24),
             )
             .margin(15)
@@ -136,11 +121,6 @@ pub fn plot_bias_histograms(
             .x_desc("deg/s")
             .y_desc("count")
             .draw()?;
-        let accept = 0.005;
-        chart.draw_series(std::iter::once(PathElement::new(
-            vec![(accept, 0u32), (accept, y_max as u32)],
-            &BLUE.mix(0.4),
-        )))?;
         chart.draw_series((0..bins).map(|i| {
             let x0 = i as f64 * bin_w;
             let x1 = x0 + bin_w;
@@ -164,7 +144,7 @@ pub fn plot_bias_histograms(
         let y_max = counts.iter().cloned().max().unwrap_or(1) + 1;
         let mut chart = ChartBuilder::on(&root)
             .caption(
-                "Accel bias RMS (µg) histogram (≤120 target)",
+                "Recovery-window accel bias RMS histogram",
                 ("sans-serif", 24),
             )
             .margin(15)
@@ -172,11 +152,6 @@ pub fn plot_bias_histograms(
             .y_label_area_size(50)
             .build_cartesian_2d(0f64..max_v, 0u32..y_max)?;
         chart.configure_mesh().x_desc("µg").y_desc("count").draw()?;
-        let accept = 120.0;
-        chart.draw_series(std::iter::once(PathElement::new(
-            vec![(accept, 0u32), (accept, y_max as u32)],
-            &BLUE.mix(0.4),
-        )))?;
         chart.draw_series((0..bins).map(|i| {
             let x0 = i as f64 * bin_w;
             let x1 = x0 + bin_w;
@@ -187,7 +162,7 @@ pub fn plot_bias_histograms(
     Ok(())
 }
 
-// Pass-rate plot (single line showing pass percentage)
+// Pass-rate plot (single line showing per-run acceptance percentage)
 pub fn plot_pass_rate(results: &[MonteCarloResult], path: &str) -> anyhow::Result<()> {
     let root = SVGBackend::new(path, (800, 200)).into_drawing_area();
     root.fill(&WHITE)?;
@@ -213,11 +188,6 @@ pub fn plot_pass_rate(results: &[MonteCarloResult], path: &str) -> anyhow::Resul
     chart.draw_series(std::iter::once(PathElement::new(
         vec![(0.0, 0.5), (rate, 0.5)],
         &GREEN,
-    )))?;
-
-    chart.draw_series(std::iter::once(PathElement::new(
-        vec![(95.0, 0.0), (95.0, 1.0)],
-        &BLUE.mix(0.5),
     )))?;
     Ok(())
 }
@@ -458,24 +428,33 @@ pub fn write_summary_csv(results: &[MonteCarloResult], path: &str) -> anyhow::Re
     let mut w = BufWriter::new(f);
     writeln!(
         w,
-        "run,rms_pos_m,rms_vel_mps,rms_att_deg,bias_bg_rms_dps,bias_ba_rms_ug,nees_mean,nis_mean,nees_covered,nis_covered,sm_rms_pos,sm_rms_vel,passed"
+        "run,rms_pos_m,rms_vel_mps,rms_att_deg,sigma3_pos_max_m,sigma3_vel_max_mps,sigma3_att_max_deg,bias_bg_rms_dps,bias_ba_rms_ug,sigma3_bg_max_dps,sigma3_ba_max_ug,nees_mean,nis_mean,nees_covered,nis_covered,smoothed_rms_pos_m,smoothed_rms_vel_mps,history_snapshots,history_events,history_props,history_capacity_bytes,passed"
     )?;
     for (i, r) in results.iter().enumerate() {
         writeln!(
             w,
-            "{},{:.6},{:.6},{:.6},{:.6},{:.3},{:.3},{:.3},{:.3},{:.3},{:.6},{:.6},{}",
+            "{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.3},{:.6},{:.3},{:.3},{:.3},{:.3},{:.3},{:.6},{:.6},{},{},{},{},{}",
             i,
             r.rms_pos,
             r.rms_vel,
             r.rms_att_deg,
+            r.sigma3_pos_max_m,
+            r.sigma3_vel_max_mps,
+            r.sigma3_att_max_deg,
             r.bias_bg_rms_dps,
             r.bias_ba_rms_ug,
+            r.sigma3_bg_max_dps,
+            r.sigma3_ba_max_ug,
             r.nees_mean,
             r.nis_mean,
             r.nees_covered,
             r.nis_covered,
             r.smoothed_rms_pos,
             r.smoothed_rms_vel,
+            r.history_snapshots,
+            r.history_events,
+            r.history_props,
+            r.history_capacity_bytes,
             if r.passed { 1 } else { 0 }
         )?;
     }

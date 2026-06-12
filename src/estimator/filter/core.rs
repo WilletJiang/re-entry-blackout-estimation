@@ -68,8 +68,8 @@ impl Estimator {
     pub fn health(&self) -> EstimatorHealth {
         use std::mem::size_of;
         let bytes = self.history.snapshots.capacity() * size_of::<Snapshot>()
-            + self.history.events.capacity() * size_of::<Event>()
-            + self.history.props.capacity() * size_of::<PropRecord>();
+            + self.history.props.capacity() * size_of::<Option<PropRecord>>()
+            + self.history.events.capacity() * size_of::<Event>();
         EstimatorHealth {
             t: self.state.t,
             last_gnss_nis: self.last_gnss_nis,
@@ -92,18 +92,29 @@ impl Estimator {
 
     #[inline]
     pub(super) fn maybe_checkpoint(&mut self, force: bool) {
+        self.maybe_checkpoint_with_prediction(force, None);
+    }
+
+    #[inline]
+    pub(super) fn maybe_checkpoint_with_prediction(
+        &mut self,
+        force: bool,
+        predicted_end_state: Option<crate::types::State>,
+    ) {
         if !force {
             let dt = self.state.t - self.last_snapshot_t;
             if dt < self.history_snapshot_dt - 1e-9 {
                 return;
             }
         }
-        self.checkpoint();
+        self.checkpoint(predicted_end_state);
     }
 
-    pub(super) fn checkpoint(&mut self) {
+    pub(super) fn checkpoint(&mut self, predicted_end_state: Option<crate::types::State>) {
         let t = self.state.t;
         let internal = self.snapshot_internal();
+        // Both the history snapshot and the propagation record need owned copies
+        // of the state because the buffers outlive this call.
         let state = self.state.clone();
         let l_cov = self.l_cov;
 
@@ -121,9 +132,18 @@ impl Estimator {
         }
 
         if self.seg_has_data {
+            let predicted_end_state = match predicted_end_state {
+                Some(state_before_update) => state_before_update,
+                None => {
+                    // The same state must be stored both as the snapshot payload
+                    // and as the predicted end state for RTS.
+                    state.clone()
+                }
+            };
             self.history.push_prop(PropRecord {
                 phi: self.seg_phi,
                 q: self.seg_q,
+                predicted_end_state,
             });
             self.seg_phi = MatN::identity();
             self.seg_q = MatN::zeros();

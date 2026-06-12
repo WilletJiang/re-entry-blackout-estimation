@@ -11,18 +11,19 @@
 
 # Project outputs
 /output/
+/output*/
 /mc_*.csv
 /mc_*.svg
 
-# LaTeX (report/)
-report/*.aux
-report/*.bbl
-report/*.blg
-report/*.fdb_latexmk
-report/*.fls
-report/*.log
-report/*.out
-report/*.synctex.gz
-report/*.toc
-report/*.xdv
-report/missfont.log
+# LaTeX (docs/report/)
+/docs/report/*.aux
+/docs/report/*.bbl
+/docs/report/*.blg
+/docs/report/*.fdb_latexmk
+/docs/report/*.fls
+/docs/report/*.log
+/docs/report/*.out
+/docs/report/*.synctex.gz
+/docs/report/*.toc
+/docs/report/*.xdv
+/docs/report/missfont.log

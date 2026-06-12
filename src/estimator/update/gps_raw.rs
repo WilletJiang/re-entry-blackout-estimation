@@ -9,6 +9,8 @@ use nalgebra::{linalg::Cholesky, DMatrix, DVector, Matrix3, Matrix6, SymmetricEi
 const GPS_RAW_MAX_ROWS: usize = 64;
 const ROW_PR: u8 = 0;
 const ROW_RR: u8 = 1;
+const RECOVERY_WINDOW_SEC: f64 = 2.0;
+const FLOAT_TIME_TOL_SEC: f64 = 1.0e-9;
 
 struct WlsRv {
     pos: Vector3<f64>,
@@ -174,6 +176,13 @@ impl Estimator {
         } else {
             None
         };
+        let predicted_end_state = if self.seg_has_data {
+            // RTS needs the propagation prior at this timestamp after the update
+            // mutates `self.state`, so the pre-update state must be owned here.
+            Some(self.state.clone())
+        } else {
+            None
+        };
 
         {
             let t = meas.t;
@@ -228,7 +237,9 @@ impl Estimator {
 
             self.apply_gps_raw_active_set(t, model.rows, &lin.dx_raw, &mut lin.k);
             suppress_pseudorange_velocity(&model.row_kind, model.rows, &mut lin.k);
-            maybe_project_velocity_weak_direction(&mut lin.k, model.info_v, model.rows);
+            if self.should_project_weak_velocity_direction(t) {
+                maybe_project_velocity_weak_direction(&mut lin.k, model.info_v, model.rows);
+            }
 
             let dx_dyn = &lin.k * &model.innov;
             self.apply_state_error(dvec_to_vecn(&dx_dyn));
@@ -242,7 +253,7 @@ impl Estimator {
 
             self.update_aero_learning(self.state.v, t);
             self.state.t = t;
-            self.maybe_checkpoint(true);
+            self.maybe_checkpoint_with_prediction(true, predicted_end_state);
         }
 
         if record {
@@ -264,6 +275,14 @@ impl Estimator {
         }
         self.bias_cal.from_pvt = false;
         self.bias_cal_observe_rv(t, sol.pos, sol.vel, &sol.r_cov);
+    }
+
+    fn should_project_weak_velocity_direction(&self, t_meas: f64) -> bool {
+        let Some((_, blackout_end)) = self.blackout_window else {
+            return false;
+        };
+        t_meas >= blackout_end - FLOAT_TIME_TOL_SEC
+            && t_meas <= blackout_end + RECOVERY_WINDOW_SEC + FLOAT_TIME_TOL_SEC
     }
 
     fn apply_gps_raw_active_set(

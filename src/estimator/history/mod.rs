@@ -28,6 +28,8 @@ pub(super) struct LoggedImu {
 pub(super) struct SnapshotInternal {
     pub bias_cal: BiasCal,
     pub gnss_reject_streak: u32,
+    pub star_reject_streak: u32,
+    pub star_reject_innovation: Option<nalgebra::Vector3<f64>>,
     pub robust_gate_alpha: Option<f64>,
     pub robust_r_scale_cap: f64,
     pub robust_student_nu: f64,
@@ -127,8 +129,8 @@ impl HistoryBuffer {
         let cutoff = newest.state.t - self.horizon;
         while self
             .snapshots
-            .front()
-            .map(|s| s.state.t < cutoff)
+            .get(1)
+            .map(|s| s.state.t <= cutoff)
             .unwrap_or(false)
         {
             self.snapshots.pop_front();
@@ -136,10 +138,11 @@ impl HistoryBuffer {
                 self.props.pop_front();
             }
         }
+        let event_cutoff = self.snapshots.front().map_or(cutoff, |s| s.state.t);
         while self
             .events
             .front()
-            .map(|e| e.time() < cutoff)
+            .map(|e| e.time() < event_cutoff)
             .unwrap_or(false)
         {
             self.events.pop_front();
@@ -154,7 +157,7 @@ impl HistoryBuffer {
             .iter()
             .enumerate()
             .rev()
-            .find(|(_, s)| s.state.t <= t)
+            .find(|(_, s)| s.state.t <= t + 1e-9)
             .map(|(i, _)| i)
     }
 

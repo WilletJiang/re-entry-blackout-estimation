@@ -52,5 +52,6 @@ pub(super) fn init_est_state(
     est.state.q = UnitQuaternion::new_normalize(
         (UnitQuaternion::from_scaled_axis(misalign_axis) * truth.q).into_inner(),
     );
-    est.state.omega = truth.omega;
+    est.state.omega =
+        truth.omega + Vector3::from_fn(|_, _| 2.0_f64.to_radians() * standard_normal.sample(rng));
 }

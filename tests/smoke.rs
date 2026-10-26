@@ -138,7 +138,7 @@ fn pvt_recovery_window_velocity_sigma_stays_inside_acceptance() {
         trace_cfg.blackout_end,
     );
 
-    assert!(trace_out.result.passed);
+    assert_recovery_diagnostics(&trace_out.result);
     assert!(vel_sigma3_max_mps <= 0.5 + 1.0e-3);
 }
 
@@ -153,7 +153,7 @@ fn tight_seed_zero_stays_bounded_through_blackout_exit() {
         trace_cfg.blackout_end,
     );
 
-    assert!(trace_out.result.passed);
+    assert_recovery_diagnostics(&trace_out.result);
     assert!(max_pos_err_m <= 10.0);
 }
 
@@ -168,7 +168,7 @@ fn tight_seed_five_stays_bounded_through_recovery_window() {
         trace_cfg.blackout_end,
     );
 
-    assert!(trace_out.result.passed);
+    assert_recovery_diagnostics(&trace_out.result);
     assert!(max_pos_err_m <= 10.0);
 }
 
@@ -190,11 +190,15 @@ fn run_trace_case(
     trace_cfg: BlackoutTraceConfig,
 ) -> MonteCarloTraceResult {
     let dyn_params = load_vehicle_props("data/Vehicle Properties Preview.csv").unwrap();
-    let aero = Arc::new(AeroTable::load("data/Aero Coeff Table.csv").unwrap());
+    let (initial, reference_aero) =
+        entry_blackout_estimation::sim::scenario::reference_entry(&dyn_params);
+    let aero = Arc::new(reference_aero);
     let rcs = Arc::new(RcsTorqueSeries::load("data/RCS Torque Series 100Hz Preview.csv").unwrap());
     let noise = NoiseParams::tuned();
     let mut cfg = SimConfig::default();
     cfg.use_tight_coupling = use_tight_coupling;
+    cfg.initial_truth = Some(initial);
+    cfg.initial_bias_jitter = Some((0.3_f64.to_radians() / 3600.0, 150e-6 * 9.80665));
     simulate_single_with_trace(seed, dyn_params, noise, aero, rcs, cfg, trace_cfg)
 }
 
@@ -214,4 +218,94 @@ fn max_trace_value_in_window(
         }
     }
     max_value
+}
+
+#[cfg(feature = "diagnostics")]
+fn assert_recovery_diagnostics(result: &entry_blackout_estimation::sim::MonteCarloResult) {
+    assert!(result.recovery_window_complete);
+    assert!(result.recovery_numerically_valid);
+    assert_eq!(result.recovery_samples, 801);
+    assert!(result.passed);
+    assert!(result.trajectory.initial_radial_velocity_mps < 0.0);
+    assert_eq!(result.trajectory.outside_aero_table_samples, 0);
+    assert!(result.trajectory.radar_eligible_samples > 0);
+}
+
+#[cfg(feature = "diagnostics")]
+#[test]
+fn contaminated_initial_star_fix_recovers_in_the_full_mission() {
+    let out = run_trace_case(14, false, recovery_trace_config());
+    assert_recovery_diagnostics(&out.result);
+    assert!(out.result.rms_pos < 2.0);
+    assert!(out.result.rms_att_deg < 0.02);
+}
+
+#[cfg(feature = "diagnostics")]
+#[test]
+fn raw_gnss_acquires_from_large_initial_navigation_errors() {
+    for seed in [145, 401, 483] {
+        let out = run_trace_case(seed, true, recovery_trace_config());
+        assert_recovery_diagnostics(&out.result);
+        assert!(
+            out.result.nis_covered > 0.85,
+            "seed {seed} remained locked out"
+        );
+        assert!(out.result.rms_pos < 2.0);
+    }
+}
+
+#[cfg(feature = "diagnostics")]
+#[test]
+fn recovery_smoothing_uses_no_measurements_after_deadline() {
+    let params = load_vehicle_props("data/Vehicle Properties Preview.csv").unwrap();
+    let (initial, aero) = entry_blackout_estimation::sim::scenario::reference_entry(&params);
+    let aero = Arc::new(aero);
+    let rcs = Arc::new(RcsTorqueSeries::load("data/RCS Torque Series 100Hz Preview.csv").unwrap());
+    let cfg = SimConfig {
+        initial_truth: Some(initial),
+        initial_bias_jitter: Some((0.3_f64.to_radians() / 3600.0, 150e-6 * 9.80665)),
+        t_final: 162.0,
+        ..SimConfig::default()
+    };
+    let at_deadline = entry_blackout_estimation::sim::simulate_single(
+        407,
+        params.clone(),
+        NoiseParams::tuned(),
+        aero.clone(),
+        rcs.clone(),
+        cfg.clone(),
+    );
+    let later = entry_blackout_estimation::sim::simulate_single(
+        407,
+        params,
+        NoiseParams::tuned(),
+        aero,
+        rcs,
+        SimConfig {
+            t_final: 180.0,
+            ..cfg
+        },
+    );
+    assert_eq!(at_deadline.recovery_at_deadline.len(), 201);
+    assert_eq!(later.recovery_at_deadline.len(), 201);
+    for (a, b) in at_deadline
+        .recovery_at_deadline
+        .iter()
+        .zip(&later.recovery_at_deadline)
+    {
+        assert_eq!(a.t, b.t);
+        assert_eq!(a.squared_error, b.squared_error);
+        assert_eq!(a.variance, b.variance);
+        assert_eq!(a.nees, b.nees);
+        for (var, limit) in a
+            .variance
+            .iter()
+            .zip(entry_blackout_estimation::sim::campaign::LIMITS)
+        {
+            assert!(3.0 * var.sqrt() <= limit);
+        }
+    }
+    // This difficult run is specifically why retrospective and instantaneous
+    // results must be reported separately, not silently substituted.
+    assert!(at_deadline.sigma3_ba_max_ug > 120.0);
 }

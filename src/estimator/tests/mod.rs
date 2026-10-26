@@ -173,7 +173,11 @@ fn robust_tuning_changes_gnss_gate() {
     tightened.l_cov = Cholesky::new(MatN::identity() * 0.01).unwrap().l();
     tightened.set_robust_tuning(0.99, 10.0, 0.0);
     tightened.update_gnss(meas);
-    assert_eq!(tightened.last_gnss_accepted, Some((0.1, false)));
+    // Tightening the position gate still permits the independently valid
+    // velocity observation; the rejected position must not move the state.
+    assert_eq!(tightened.last_gnss_accepted, Some((0.1, true)));
+    assert!(baseline.state.r.x > 0.2);
+    assert_eq!(tightened.state.r.x, 0.0);
 }
 
 #[test]
@@ -425,4 +429,221 @@ fn make_raw_gps_meas(r_user: Vector3<f64>, v_user: Vector3<f64>, t: f64) -> supe
     }
 
     super::GpsRawMeas { t, sats }
+}
+
+#[test]
+fn angular_rate_observer_covariance_includes_memory_bias_and_shared_noise() {
+    let mut est = Estimator::new(NoiseParams::default(), DynamicsParams::default(), 1.0);
+    est.state.r = Vector3::new(est.dyn_params.radius_earth + 60_000.0, 0.0, 0.0);
+    let dt = 0.0025;
+    let bias_var = 2e-8;
+    let mut prior = MatN::identity() * 1e-6;
+    for axis in 0..3 {
+        prior[(9 + axis, 9 + axis)] = 100.0;
+        prior[(12 + axis, 12 + axis)] = bias_var;
+    }
+    est.l_cov = prior.cholesky().unwrap().l();
+    let gyro_density_sq = est.noise.gyro_noise.powi(2);
+    let (gain, _) = est.rate_observer_gains(dt);
+    est.propagate(ImuSample {
+        t: dt,
+        dt,
+        accel_meas: Vector3::zeros(),
+        gyro_meas: Vector3::zeros(),
+        torque_cmd: Vector3::zeros(),
+        force_cmd: Vector3::zeros(),
+    });
+    let cov = est.cov();
+    for axis in 0..3 {
+        let inertia = est.dyn_params.inertia[(axis, axis)];
+        let expected_rate_variance = (1.0 - gain).powi(2) * 100.0
+            + gain.powi(2) * (bias_var + gyro_density_sq / dt)
+            + ((dt * (1.0 - 0.5 * gain)).powi(2) * 1e-6 + est.noise.torque_noise.powi(2) * dt)
+                / inertia.powi(2);
+        assert!((cov[(9 + axis, 9 + axis)] - expected_rate_variance).abs() < 1e-10);
+        assert!((cov[(9 + axis, 12 + axis)] + gain * bias_var).abs() < 1e-12);
+        assert!(
+            (cov[(6 + axis, 9 + axis)] - gain * (dt * bias_var + gyro_density_sq)).abs() < 1e-12
+        );
+    }
+}
+
+#[test]
+fn angular_noise_factor_preserves_all_cross_covariance_blocks() {
+    let mut est = Estimator::new(NoiseParams::default(), DynamicsParams::default(), 1.0);
+    est.set_blackout_residual(120.0, 160.0, 1000.0, Some(300.0));
+    for t in [0.0, 140.0, 161.0] {
+        est.state.t = t;
+        let q = est.process_noise(0.0025);
+        let factor = est.process_noise_factor(&q);
+        assert!((q - factor * factor.transpose()).norm() < 1e-10);
+    }
+}
+
+#[test]
+fn star_tracker_recovers_from_a_contaminated_first_fix() {
+    let mut est = Estimator::new(NoiseParams::tuned(), DynamicsParams::default(), 10.0);
+    est.set_precalibration(false, 120.0);
+    est.state.r = Vector3::new(est.dyn_params.radius_earth + 100_000.0, 0.0, 0.0);
+    let r_cov = Matrix3::identity() * (20e-6_f64).powi(2);
+    est.update_star(super::StarMeas {
+        t: 0.0,
+        q_bi: UnitQuaternion::from_scaled_axis(Vector3::new(0.05, 0.0, 0.0)),
+        r_cov,
+    });
+    assert!(est.state.q.angle() > 0.04);
+    for k in 1..=1000 {
+        let t = k as f64 * 0.0025;
+        est.propagate(ImuSample {
+            t,
+            dt: 0.0025,
+            gyro_meas: Vector3::zeros(),
+            accel_meas: Vector3::zeros(),
+            force_cmd: Vector3::zeros(),
+            torque_cmd: Vector3::zeros(),
+        });
+        if k % 200 == 0 {
+            est.update_star(super::StarMeas {
+                t,
+                q_bi: UnitQuaternion::identity(),
+                r_cov,
+            });
+        }
+    }
+    assert!(
+        est.state.q.angle() < 1e-5,
+        "attitude was locked to its first outlier"
+    );
+    assert_eq!(est.star_reject_streak, 0);
+    assert!(est.cov().cholesky().is_some());
+}
+
+#[test]
+fn history_retains_anchor_for_the_entire_ten_second_lag() {
+    let mut est = Estimator::new(NoiseParams::tuned(), DynamicsParams::default(), 10.0);
+    est.state.r.x = est.dyn_params.radius_earth;
+    for k in 1..=4801 {
+        est.propagate(ImuSample {
+            t: k as f64 * 0.0025,
+            dt: 0.0025,
+            gyro_meas: Vector3::zeros(),
+            accel_meas: Vector3::zeros(),
+            force_cmd: Vector3::zeros(),
+            torque_cmd: Vector3::zeros(),
+        });
+    }
+    let newest = est.history.snapshots.back().unwrap().state.t;
+    let oldest = est.history.snapshots.front().unwrap().state.t;
+    assert!(newest - oldest >= 10.0 - 1e-9);
+    let (smoothed, _) = est.rts_smooth(10.0).expect("full lag must be retained");
+    assert!((newest - smoothed.t - 10.0).abs() < 0.011);
+}
+
+#[test]
+fn angular_linearization_matches_perturbed_observer_states() {
+    fn estimator() -> Estimator {
+        let mut est = Estimator::new(NoiseParams::tuned(), DynamicsParams::default(), 1.0);
+        est.state.r.x = est.dyn_params.radius_earth + 60_000.0;
+        est.state.q = UnitQuaternion::from_scaled_axis(Vector3::new(0.1, -0.2, 0.03));
+        est.state.omega = Vector3::new(0.02, -0.01, 0.03);
+        est.state.aero_res_torque = Vector3::new(1.0, 2.0, 3.0);
+        est
+    }
+    let dt = 0.0025;
+    let imu = ImuSample {
+        t: dt,
+        dt,
+        gyro_meas: Vector3::new(0.02, -0.01, 0.03),
+        accel_meas: Vector3::zeros(),
+        force_cmd: Vector3::zeros(),
+        torque_cmd: Vector3::zeros(),
+    };
+    let base = estimator();
+    let (phi, _) = base.linearize(dt, Vector3::zeros());
+    let epsilon = 1e-6;
+    for column in (6..15).chain(21..24) {
+        let mut plus = estimator();
+        let mut minus = estimator();
+        let mut error = super::VecN::zeros();
+        error[column] = epsilon;
+        plus.apply_state_error(error);
+        minus.apply_state_error(-error);
+        plus.propagate_internal(imu.clone(), false);
+        minus.propagate_internal(imu.clone(), false);
+        let attitude = (plus.state.q * minus.state.q.inverse()).scaled_axis() / (2.0 * epsilon);
+        let rate = (plus.state.omega - minus.state.omega) / (2.0 * epsilon);
+        for axis in 0..3 {
+            assert!(
+                (attitude[axis] - phi[(6 + axis, column)]).abs() < 1e-6,
+                "attitude Jacobian column {column}"
+            );
+            assert!(
+                (rate[axis] - phi[(9 + axis, column)]).abs() < 1e-6,
+                "rate Jacobian column {column}"
+            );
+        }
+    }
+}
+
+#[test]
+fn gnss_position_outlier_keeps_an_independently_valid_velocity() {
+    let mut est = Estimator::new(NoiseParams::tuned(), DynamicsParams::default(), 1.0);
+    est.state.r.x = est.dyn_params.radius_earth + 60_000.0;
+    let original_r = est.state.r;
+    let mut p = MatN::identity() * 1e-6;
+    for i in 0..3 {
+        p[(i, i)] = 1.0;
+        p[(i + 3, i + 3)] = 0.01;
+    }
+    est.l_cov = p.cholesky().unwrap().l();
+    let mut r_cov = Matrix6::identity() * 3.61;
+    for i in 3..6 {
+        r_cov[(i, i)] = 0.0064;
+    }
+    est.update_gnss(GnssMeas {
+        t: 0.0,
+        pos: original_r + Vector3::new(1000.0, 0.0, 0.0),
+        vel: Vector3::new(0.1, 0.0, 0.0),
+        r_cov,
+    });
+    assert!(est.last_gnss_base_nis.unwrap().1 > 1000.0);
+    assert_eq!(est.last_gnss_accepted, Some((0.0, true)));
+    assert_eq!(est.state.r, original_r);
+    assert!(est.state.v.x > 0.05 && est.state.v.x < 0.1);
+    assert!(est.cov()[(3, 3)] < 0.01);
+}
+
+#[test]
+fn raw_acquisition_recovers_a_prior_tail_but_not_inconsistent_ranges() {
+    let truth_r = Vector3::new(6_438_137.0, 0.0, 3_000_000.0);
+    let truth_v = Vector3::new(0.0, 3_000.0, 0.0);
+    let mut est = Estimator::new(NoiseParams::tuned(), DynamicsParams::default(), 1.0);
+    est.state.r = truth_r + Vector3::new(30_000.0, 0.0, 0.0);
+    est.state.v = truth_v;
+    let mut prior = MatN::identity() * 1e-6;
+    for i in 0..3 {
+        prior[(i, i)] = 5_000.0_f64.powi(2);
+        prior[(i + 3, i + 3)] = 50.0_f64.powi(2);
+    }
+    est.l_cov = prior.cholesky().unwrap().l();
+    let clean = make_raw_gps_meas(truth_r, truth_v, 0.0);
+    est.update_gps_raw(clean.clone());
+    assert_eq!(est.last_gnss_accepted, Some((0.0, false)));
+    let mut bad = clean.clone();
+    bad.sats[0].pr_m += 10_000.0;
+    for _ in 0..12 {
+        est.update_gps_raw(bad.clone());
+    }
+    assert_eq!(est.state.r, truth_r + Vector3::new(30_000.0, 0.0, 0.0));
+    assert!(
+        (est.cov() - prior).norm() < 1e-7,
+        "inconsistent ranges widened the prior"
+    );
+    for _ in 0..9 {
+        est.update_gps_raw(clean.clone());
+    }
+    assert_eq!(est.last_gnss_accepted, Some((0.0, true)));
+    assert!((est.state.r - truth_r).norm() < 1.0);
+    assert!((est.state.v - truth_v).norm() < 0.01);
+    assert!(est.cov().cholesky().is_some());
 }

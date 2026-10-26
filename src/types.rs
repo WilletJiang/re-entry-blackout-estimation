@@ -33,11 +33,17 @@ impl Default for DynamicsParams {
 
 #[derive(Debug, Clone)]
 pub struct NoiseParams {
+    /// Continuous gyro noise density, rad / sqrt(s). Rate variance is sigma^2 / dt.
     pub gyro_noise: f64,
+    /// Continuous accelerometer noise density, (m/s) / sqrt(s).
     pub accel_noise: f64,
+    /// Gyro bias random-walk density, (rad/s) / sqrt(s).
     pub gyro_bias_rw: f64,
+    /// Accelerometer bias random-walk density, (m/s^2) / sqrt(s).
     pub accel_bias_rw: f64,
     pub torque_noise: f64,
+    /// Natural frequency (rad/s) of the causal rate/torque observer.
+    pub rate_observer_bandwidth: f64,
     pub accel_residual: f64,
     /// Dimensionless scaling applied to the translational process noise (RV block)
     /// before/within/after GNSS blackout.
@@ -72,10 +78,9 @@ impl Default for NoiseParams {
             gyro_noise: 0.005_f64.to_radians(),
             accel_noise: 120e-6 * 9.80665,
             gyro_bias_rw: 4e-4_f64.to_radians(),
-            // Reduced accel-bias RW to prevent excessive cross-covariance buildup
-            // Truth ba is drawn from N(0, 150ug), so we use a smaller process noise
             accel_bias_rw: 50e-6 * 9.80665,
             torque_noise: 20.0,
+            rate_observer_bandwidth: 2.0,
             // Translational residual specific-force spectral density (m/s^2/√Hz)
             // Moderate value to balance position noise vs covariance growth
             accel_residual: 2.0,
@@ -102,17 +107,15 @@ impl Default for NoiseParams {
 impl NoiseParams {
     pub fn tuned() -> Self {
         let mut n = Self::default();
-        n.gyro_bias_rw = 7e-5_f64.to_radians(); // 0.07 mdps/√Hz
-                                                // Bias is nearly constant over the short mission window; keep RW small so
-                                                // GNSS can actually converge it instead of it random-walking away.
-        n.accel_bias_rw = 2e-6_f64 * 9.80665; // 2 µg/√Hz in SI units
-                                              // Keep translational process noise in-family with the IMU spec so that
-                                              // GNSS velocity can actually calibrate accelerometer bias (otherwise Q dominates).
-        n.accel_residual = 0.003; // m/s²/√Hz (~300 µg)
-                                  // Phase-dependent inflation: modest before/after blackout, stronger in blackout.
+        // Reference physical noise densities; truth remains independently configured.
+        n.gyro_bias_rw = 7e-5_f64.to_radians();
+        n.accel_bias_rw = 2e-6_f64 * 9.80665;
+        // Specific force is measured by the accelerometer. Do not add the
+        // aerodynamic residual a second time to strapdown translational noise.
+        n.accel_residual = 0.0;
         n.q_scale_rv_pre = 1.0;
-        n.q_scale_rv_blk = 10.0;
-        n.q_scale_rv_post = 2.0;
+        n.q_scale_rv_blk = 1.0;
+        n.q_scale_rv_post = 1.0;
         n.q_scale_ba_pre = 1.0;
         n.q_scale_ba_blk = 1.0;
         n.q_scale_ba_post = 1.0;
@@ -121,7 +124,7 @@ impl NoiseParams {
         // Allow measurable but bounded accelerometer-bias corrections during
         // GNSS availability windows (pre/post blackout).
         n.gps_raw_max_ba_update = 20e-6_f64 * 9.80665; // 20 µg per update
-        n.gps_ba_update_gain = 0.0;
+        n.gps_ba_update_gain = 1.0;
         // Increase aero residual within blackout to ~1000 N for better covariance growth
         n.aero_force_rw_blackout = Some(1000.0);
         // Also increase torque residual during blackout for attitude uncertainty

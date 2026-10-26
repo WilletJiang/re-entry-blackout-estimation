@@ -1,49 +1,102 @@
-# Design Note: Entry Blackout Estimation
+# Estimator design
 
-This note records the estimator design currently used to satisfy the acceptance basis defined in `tasks.md`. The estimator must cross a forty second GNSS blackout, recover within the two second post blackout window, preserve covariance credibility, and remain inside the runtime and memory envelope of the task. In the diagnostics workflow, recovery window RMS errors are reported for diagnosis, while per run acceptance is evaluated from recovery window norm equivalent three sigma maxima.
+The core is a 24-dimensional error-state square-root EKF. The nominal state is
+`r, v, q, omega, bg, ba, residual_force, residual_torque`. Attitude errors are
+left-multiplicative, in the inertial frame: `q_true = Exp(delta_theta) q_est`.
+The reference harness preserves the causal IMU-rate assessment over `[160,162] s`.
+It separately evaluates the task's permitted retrospective checkpoint estimates,
+conditioned only on observations received by the recovery deadline at 162 s.
 
-## Design Objective
+## Propagation
 
-The design is shaped by four constraints. First, blackout removes the most informative translational observation for a prolonged interval. Second, star tracker and radar measurements are delayed and may arrive out of order. Third, entry dynamics are strongly nonlinear and imperfectly modelled, so a numerically fragile covariance form is unacceptable. Fourth, a filter with optimistic covariance creates downstream risk, so NEES and NIS are part of the design target and the validation basis.
+Translation uses debiased measured specific force. Aerodynamic residual force
+must not also be injected into its covariance as though it were an unmeasured
+acceleration. Attitude uses the debiased interval-average gyro reading. Its
+bias Jacobian is `-R(q) dt`, not a body-frame Jacobian attached to an inertial
+attitude error.
 
-## State Form and Propagation
+Angular rate is estimated by a causal second-order rate/torque observer. With
+natural frequency `w = 2 rad/s`, `a = sqrt(2) w dt`, `b = w² dt`, and nominal
+rigid-body angular acceleration `alpha`, its update is
 
-The estimator uses a 24 state error state square root EKF. The nominal state contains position, velocity, attitude, angular rate, gyroscope bias, accelerometer bias, residual aerodynamic force, and residual aerodynamic torque. Attitude is corrected multiplicatively, which keeps the quaternion normalized and localizes covariance to a three component attitude error. Covariance is propagated in square root form through QR based time updates so that positive definiteness and conditioning remain controlled during long inertial propagation.
+```
+innovation = gyro - bg - omega_old - alpha * dt/2
+omega_new = omega_old + alpha * dt + a * innovation
+torque_residual_new = exp(-dt/tau) * torque_residual_old + J * b * innovation
+```
 
-Translational state propagation follows a strapdown formulation driven by debiased IMU specific force and body rate. At the same time, truth propagation and filter side nominal linearization use the same aerodynamic and RCS composition helper from `physics.rs`. This arrangement gives the simulator and the filter a shared deterministic dynamics model without double counting measured acceleration inside the state integrator.
+Nominal acceleration includes aerodynamic moment, commanded torque, residual
+torque, and `-omega × J omega`. This estimates the current rate; it introduces no
+fixed output delay. Its response bandwidth is finite. Attitude propagation
+continues to use the gyro directly, avoiding dependence of attitude integration
+on aerodynamic moment fidelity.
 
-## Uncertainty Model
+The transition retains rate memory and the coupling to gyro bias and residual
+torque. Gyro noise enters attitude, rate, and torque through the **same** random
+input, with gains `R dt`, `a I`, and `J b`. The process covariance includes their
+cross terms. Its angular 9×9 block is factored without adding arbitrary noise to
+zero-variance dimensions. QR propagation preserves the covariance square root.
+The local angular model is a linearization, not a guarantee under arbitrary
+unmodelled aerodynamic moments; independent physical model validation remains
+necessary.
 
-The process model is phase aware. The translational noise block and the accelerometer bias random walk can be scaled independently before blackout, during blackout, and after blackout through the `q_scale_rv_*` and `q_scale_ba_*` parameters. Residual aerodynamic force and torque are represented as first order Gauss Markov states with optional blackout specific excitation levels. Additional attitude and translational growth is introduced during the star tracker saturation interval so that covariance reflects the temporary loss of attitude information.
+## Observations and bias recovery
 
-This structure keeps covariance realistic across regime changes. A uniform process noise model would understate uncertainty during blackout and overstate it during nominal observation periods.
+The default estimator estimates random-walk biases continuously, using the full
+cross covariance in GNSS and star updates. Radar uses the same gain for the state
+and Joseph covariance updates. The earlier constant-bias batch calibration is
+still available through `set_precalibration(true, ...)`, but is disabled by
+default and is not used by the reference campaign.
 
-## Measurement Update Policy
+GNSS PVT and raw pseudorange/Doppler share the timestamped replay mechanism.
+There is no special clean GNSS fix or scheduled covariance reset at blackout
+exit. Ordinary 10 Hz observations remain subject to dropout and contamination.
+The raw path checks its original innovation before residual-dependent covariance
+inflation, so a severe outlier cannot make itself appear consistent by inflating
+its own measurement covariance. The default sequential mode uses all observable
+state directions, without the former recovery-only geometry projection. With a
+large uncertain raw-GNSS prior, iterative WLS first handles the nonlinear position
+acquisition. Its post-fit residual and its innovation against the prior are both
+gated; its full joint position/velocity covariance is assimilated once. The
+original raw NIS is retained. Repeated raw rejections also enter acquisition.
+Eight internally valid acquisition solutions rejected by the prior trigger RV
+covariance widening, as in the PVT recovery path; inconsistent WLS residuals break
+the streak. This prevents a rare Gaussian prior-tail draw from rejecting all later
+good observations. The next epoch must pass the ordinary gates. A rejected PVT position no longer discards an
+independently gated valid velocity measurement.
 
-The update architecture is intentionally conservative. GNSS PVT updates operate on the position and velocity subspace only, which prevents spurious cross covariance from pulling attitude and bias states in poorly supported directions. Star tracker updates remain attitude only. Radar updates remain scalar altitude updates. Raw GNSS updates fuse pseudorange and Doppler directly when tight coupling is enabled.
+Eight consecutive rejected PVT epochs trigger covariance widening for a lost
+navigation solution. Three isolated outliers were too short a trigger under the
+specified 5% contamination. For stars, three **consistent** rejected attitude
+innovations trigger reacquisition; unrelated outliers do not. This repairs an
+incorrect first star fix that would otherwise lock out subsequent good fixes.
+Reacquisition counters and previous rejected star innovations are checkpointed.
 
-The baseline PVT path now uses a single measurement construction rule for both nominal tracking and blackout exit reacquisition. The recovery update is applied at blackout exit itself, and its velocity covariance matches the ordinary PVT update. This keeps the recovery window velocity bound aligned with the intended PVT sensor model from the first accepted sample onward.
+## History and smoothing
 
-All updates are gated by NIS based chi square tests. The covariance update uses Joseph form together with explicit positive definiteness enforcement. When numerical roundoff or aggressive tuning threatens symmetry or definiteness, the code falls back through Cholesky repair, diagonal jitter, and spectral regularization.
+Every attempted observation, including a rejected one, is retained. A delayed
+observation restores the last snapshot at its measurement time, then re-evaluates
+all later observations during replay. Discarding rejected observations would
+make gate decisions and reacquisition counters depend on arrival order.
 
-## Temporal Alignment and History Semantics
+Pruning preserves an anchor at or just before the full ten-second cutoff and all
+IMU events needed after that anchor. RTS smoothing traverses backwards with one
+state/covariance pair; it does not allocate three arrays proportional to history
+length. `visit_smoothed` streams these checkpoints newest-first and uses a
+Cholesky solve rather than an explicit predicted-covariance inverse. The deadline
+assessment calls it once at 162 s, retains exactly the 100 Hz grid in `[160,162]`,
+and never revises those results using later arrivals. The causal 400 Hz results
+remain separately available. This is a first-order EKF/RTS approximation, not a
+continuous-time guarantee between checkpoints. Propagation after warmup and the smoother are checked for zero heap
+allocation. Delayed replay and raw GNSS still allocate temporary workspaces;
+`resourcebench` includes them in the peak measurement.
 
-Delayed data are handled with a fixed lag history buffer. Every measurement is interpreted at its measurement timestamp. Arrival time is not used as the update time. When a delayed or out of order measurement is received, the estimator restores the latest snapshot not later than that timestamp, replays the recorded event stream to the measurement time, applies the update there, and then replays the remaining events forward to the present state.
+## Reference-model assumptions
 
-This contract yields two important invariants. The first is temporal consistency: state and covariance are updated at the time where the measurement model is valid. The second is replay determinism: any state or covariance modification that must survive a rewind must either be reproduced by replayed events or be checkpointed in a snapshot at the same timestamp. The replay safe interfaces `inflate_rv_record` and `apply_bias_calibration_record` exist for exactly this reason.
-
-## Tight Coupling Strategy
-
-The tight coupled path is implemented in `update_gps_raw_ref`. Pseudorange rows are robustified against heavy tailed residuals. Pseudorange is also prevented from directly updating velocity, which reduces noise injection through position and velocity cross covariance. Doppler rows carry the main velocity information, but that information can become unreliable during the short reacquisition interval immediately after blackout exit. The implementation therefore checks the Doppler geometry and removes the weakest velocity direction only inside the two second recovery window. Outside that interval the full Doppler geometry is retained, so the nominal pre blackout solution continues to accumulate translational information and enters blackout with a well constrained prior.
-
-## Bias Management
-
-Accelerometer bias is the most delicate hidden state in this task because blackout removes the measurements that best constrain translational drift. The repository therefore separates bias preparation from the main filter. A dedicated pre blackout calibration stage accumulates a small normal equation over the observation rich interval before blackout and applies a bounded correction at blackout entry. The EKF then carries the corrected bias state through the unobservable segment. Bias identification during blackout is intentionally limited because the available information is weak.
-
-## Runtime and Memory Envelope
-
-History snapshots are stored at a default cadence of one hundred hertz. IMU events are stored at IMU rate for replay, and the propagation records needed for RTS smoothing are retained between snapshots. The diagnostics harness now runs with a ten second fixed lag horizon by default so that the validation path matches the task requirement. Runtime health can be inspected through `Estimator::health()`, which exposes recent GNSS gate status together with history usage statistics, and the harness records the peak history counters and memory estimate into its summary artifacts.
-
-When blackout trace recording is enabled, the recorder stores position error, velocity error, norm equivalent position three sigma, norm equivalent velocity three sigma, and RV NEES on a common time grid. The trace therefore mirrors the acceptance convention used by the per run summary and supports direct time localization of recovery window regressions.
-
-In summary, the estimator combines four mechanisms that address distinct blackout recovery risks. The square root covariance form protects numerical stability, the history buffer preserves time consistency, tight coupled raw GNSS improves recovery observability, and pre blackout bias calibration reduces hidden drift before the least observable phase.
+The reference scenario is synthetic. PVT position/velocity standard deviations
+are 1.9 m and 0.08 m/s per axis; raw pseudorange/range-rate standard deviations
+are 1.5 m and 0.02 m/s. These modes do not have identical GNSS information quality.
+The simulator uses idealized inertial satellite orbits and omits receiver clock
+states, atmospheric propagation, and sensor scale-factor errors. Physical-model
+validation and target execution measurements are separate from the numerical
+screen; see [verification.md](verification.md).

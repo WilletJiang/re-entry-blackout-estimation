@@ -47,10 +47,29 @@ impl Estimator {
             false
         };
 
-        let sg_effective = if in_star_saturation { sg * 10.0 } else { sg };
-
+        let (rate_gain, torque_gain) = self.rate_observer_gains(dt);
+        let mut gyro_input = super::MeasMat::<3>::zeros().transpose();
+        gyro_input
+            .fixed_view_mut::<3, 3>(6, 0)
+            .copy_from(&(self.state.q.to_rotation_matrix().matrix() * dt));
+        gyro_input
+            .fixed_view_mut::<3, 3>(9, 0)
+            .copy_from(&(nalgebra::Matrix3::identity() * rate_gain));
+        gyro_input
+            .fixed_view_mut::<3, 3>(21, 0)
+            .copy_from(&(self.dyn_params.inertia * torque_gain));
+        q += gyro_input * gyro_input.transpose() * (sg * sg / dt);
+        let inertia_inv = self
+            .dyn_params
+            .inertia
+            .try_inverse()
+            .expect("inertia must be invertible");
+        let angular_process =
+            inertia_inv * inertia_inv.transpose() * self.noise.torque_noise.powi(2) * dt;
         for i in 0..3 {
-            q[(i + 6, i + 6)] = sg_effective * sg_effective * dt;
+            for j in 0..3 {
+                q[(i + 9, j + 9)] += angular_process[(i, j)];
+            }
         }
 
         let s_af_effective = if in_star_saturation { s_af * 5.0 } else { s_af };
@@ -79,7 +98,7 @@ impl Estimator {
             q[(i + 18, i + 18)] = qd_f;
         }
         for i in 0..3 {
-            q[(i + 21, i + 21)] = qd_t;
+            q[(i + 21, i + 21)] += qd_t;
         }
         q
     }
@@ -106,8 +125,23 @@ impl Estimator {
             }
         }
 
-        for diag_idx in 6..9 {
-            lq[(diag_idx, diag_idx)] = q[(diag_idx, diag_idx)].max(0.0).sqrt();
+        // Factor only the coupled attitude/rate/torque block. A zero pivot
+        // is allowed for exact zero-noise configurations without bias jitter.
+        let angular_indices = [6, 7, 8, 9, 10, 11, 21, 22, 23];
+        for (row, &i) in angular_indices.iter().enumerate() {
+            for (column, &j) in angular_indices.iter().enumerate().take(row + 1) {
+                let mut value = q[(i, j)];
+                for &k in angular_indices.iter().take(column) {
+                    value -= lq[(i, k)] * lq[(j, k)];
+                }
+                lq[(i, j)] = if row == column {
+                    value.max(0.0).sqrt()
+                } else if lq[(j, j)] > 0.0 {
+                    value / lq[(j, j)]
+                } else {
+                    0.0
+                };
+            }
         }
         for diag_idx in 12..15 {
             lq[(diag_idx, diag_idx)] = q[(diag_idx, diag_idx)].max(0.0).sqrt();
@@ -116,9 +150,6 @@ impl Estimator {
             lq[(diag_idx, diag_idx)] = q[(diag_idx, diag_idx)].max(0.0).sqrt();
         }
         for diag_idx in 18..21 {
-            lq[(diag_idx, diag_idx)] = q[(diag_idx, diag_idx)].max(0.0).sqrt();
-        }
-        for diag_idx in 21..24 {
             lq[(diag_idx, diag_idx)] = q[(diag_idx, diag_idx)].max(0.0).sqrt();
         }
 

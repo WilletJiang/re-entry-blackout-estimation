@@ -1,8 +1,7 @@
 use super::{
     history::Event, math::chol_lower_with_enforce, robust::ROBUST_SENSOR_STAR, Estimator, MatN,
-    MeasMat, StarMeas, VecN,
+    MeasMat, StarMeas,
 };
-use crate::types::STATE_DIM;
 use crate::util::enforce_pd;
 use nalgebra::linalg::Cholesky;
 
@@ -48,17 +47,24 @@ impl Estimator {
         let base_s_chol = match Cholesky::new(base_s.clone()) {
             Some(c) => c,
             None => {
+                if record {
+                    self.history.push_event(Event::Star(meas));
+                }
                 self.replay_tail(replay_events);
                 return;
             }
         };
         let base_s_inv = base_s_chol.inverse();
         let base_d2 = (angle_axis.transpose() * base_s_inv * angle_axis)[(0, 0)];
+        self.last_star_base_nis = Some((meas.t, base_d2, 3));
         let meas_r_cov = self.robust_scale(ROBUST_SENSOR_STAR, 3, base_d2, meas.r_cov);
         let s = h.clone() * p.clone() * h.transpose() + meas_r_cov;
         let s_chol = match Cholesky::new(s.clone()) {
             Some(c) => c,
             None => {
+                if record {
+                    self.history.push_event(Event::Star(meas));
+                }
                 self.replay_tail(replay_events);
                 return;
             }
@@ -67,30 +73,42 @@ impl Estimator {
         let d2 = (angle_axis.transpose() * s_inv.clone() * angle_axis)[(0, 0)];
         let gate_sq = self.robust_gate_sq_or(3, self.noise.star_nis_gate_sq);
         if !d2.is_finite() || d2 > gate_sq {
+            // An initially contaminated attitude can be overconfident. Three
+            // consistent rejected innovations indicate a lost attitude solution,
+            // whereas isolated or inconsistent Cauchy outliers do not.
+            if angle_axis.iter().all(|v| v.is_finite()) {
+                let consistent = self
+                    .star_reject_innovation
+                    .is_some_and(|previous| (angle_axis - previous).norm() < 0.002);
+                self.star_reject_streak = if consistent {
+                    self.star_reject_streak + 1
+                } else {
+                    1
+                };
+                self.star_reject_innovation = Some(angle_axis);
+                if self.star_reject_streak >= 3 {
+                    let mut widened = self.cov();
+                    for i in 6..9 {
+                        widened[(i, i)] += 5.0_f64.to_radians().powi(2);
+                    }
+                    self.l_cov = chol_lower_with_enforce(widened, "star reacquisition");
+                    self.star_reject_streak = 0;
+                    self.star_reject_innovation = None;
+                }
+            }
+            if record {
+                self.history.push_event(Event::Star(meas));
+            }
             self.replay_tail(replay_events);
             return;
         }
+        self.star_reject_streak = 0;
+        self.star_reject_innovation = None;
         self.update_iae_scale(ROBUST_SENSOR_STAR, 3, d2);
 
         let k = p.clone() * h.transpose() * s_inv;
-        let dx = k.clone() * angle_axis;
-        let mut dx_att_only = VecN::zeros();
-        for i in 6..9 {
-            dx_att_only[i] = dx[i];
-        }
-        self.apply_state_error(dx_att_only);
-
-        let mut k_att = k.clone();
-        for i in 0..6 {
-            for j in 0..3 {
-                k_att[(i, j)] = 0.0;
-            }
-        }
-        for i in 9..STATE_DIM {
-            for j in 0..3 {
-                k_att[(i, j)] = 0.0;
-            }
-        }
+        self.apply_state_error(k * angle_axis);
+        let k_att = k;
         let i_kh = MatN::identity() - (k_att.clone() * h.clone());
         let mut p_new =
             i_kh * p * i_kh.transpose() + k_att.clone() * meas_r_cov * k_att.transpose();

@@ -174,7 +174,10 @@ pub fn plot_pass_rate(results: &[MonteCarloResult], path: &str) -> anyhow::Resul
         0.0
     };
     let mut chart = ChartBuilder::on(&root)
-        .caption(format!("Pass rate: {:.1}%", rate), ("sans-serif", 24))
+        .caption(
+            format!("Recovery covariance screen: {:.1}%", rate),
+            ("sans-serif", 24),
+        )
         .margin(15)
         .x_label_area_size(30)
         .y_label_area_size(40)
@@ -428,12 +431,12 @@ pub fn write_summary_csv(results: &[MonteCarloResult], path: &str) -> anyhow::Re
     let mut w = BufWriter::new(f);
     writeln!(
         w,
-        "run,rms_pos_m,rms_vel_mps,rms_att_deg,sigma3_pos_max_m,sigma3_vel_max_mps,sigma3_att_max_deg,bias_bg_rms_dps,bias_ba_rms_ug,sigma3_bg_max_dps,sigma3_ba_max_ug,nees_mean,nis_mean,nees_covered,nis_covered,smoothed_rms_pos_m,smoothed_rms_vel_mps,history_snapshots,history_events,history_props,history_capacity_bytes,passed"
+        "run,rms_pos_m,rms_vel_mps,rms_att_deg,sigma3_pos_max_m,sigma3_vel_max_mps,sigma3_att_max_deg,bias_bg_rms_dps,bias_ba_rms_ug,sigma3_bg_max_dps,sigma3_ba_max_ug,nees_mean,nis_mean,nees_covered,nis_covered,smoothed_rms_pos_m,smoothed_rms_vel_mps,history_snapshots,history_events,history_props,history_capacity_bytes,passed,seed,rms_omega_dps,sigma3_omega_max_dps,recovery_samples,recovery_window_complete,recovery_numerically_valid,seed_schema"
     )?;
     for (i, r) in results.iter().enumerate() {
         writeln!(
             w,
-            "{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.3},{:.6},{:.3},{:.3},{:.3},{:.3},{:.3},{:.6},{:.6},{},{},{},{},{}",
+            "{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.3},{:.6},{:.3},{:.3},{:.3},{:.3},{:.3},{:.6},{:.6},{},{},{},{},{},{},{:.6},{:.6},{},{},{},2",
             i,
             r.rms_pos,
             r.rms_vel,
@@ -455,7 +458,9 @@ pub fn write_summary_csv(results: &[MonteCarloResult], path: &str) -> anyhow::Re
             r.history_events,
             r.history_props,
             r.history_capacity_bytes,
-            if r.passed { 1 } else { 0 }
+            if r.passed { 1 } else { 0 },
+            r.seed, r.rms_omega_dps, r.sigma3_omega_max_dps, r.recovery_samples,
+            r.recovery_window_complete as u8, r.recovery_numerically_valid as u8
         )?;
     }
     Ok(())
@@ -536,5 +541,45 @@ pub fn write_nees_phase_csv(results: &[MonteCarloResult], path: &str) -> anyhow:
             r.nis_covered_tail,
         )?;
     }
+    Ok(())
+}
+
+/// Truth-only scenario diagnostics, separately from estimator performance.
+pub fn write_trajectory_csv(results: &[MonteCarloResult], path: &str) -> anyhow::Result<()> {
+    let mut w = csv::Writer::from_path(path)?;
+    w.write_record([
+        "seed",
+        "initial_altitude_m",
+        "initial_radial_velocity_mps",
+        "final_altitude_m",
+        "min_altitude_m",
+        "max_altitude_m",
+        "min_mach",
+        "max_mach",
+        "samples",
+        "outside_aero_table_samples",
+        "radar_eligible_samples",
+        "finite",
+        "seed_schema",
+    ])?;
+    for result in results {
+        let t = &result.trajectory;
+        w.serialize((
+            result.seed,
+            t.initial_altitude_m,
+            t.initial_radial_velocity_mps,
+            t.final_altitude_m,
+            t.min_altitude_m,
+            t.max_altitude_m,
+            t.min_mach,
+            t.max_mach,
+            t.samples,
+            t.outside_aero_table_samples,
+            t.radar_eligible_samples,
+            t.finite,
+            2,
+        ))?;
+    }
+    w.flush()?;
     Ok(())
 }

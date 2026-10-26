@@ -1,66 +1,54 @@
 # Entry Blackout Estimation
 
-Chinese documentation: [README_CN.md](README_CN.md)
+[中文](README_CN.md) · [Task specification](tasks.md)
 
-## Overview
+A Rust navigation-estimation study using a 24-state square-root error-state EKF,
+a causal angular-rate observer, timestamped measurement replay, and fixed-lag RTS
+smoothing. It supports GNSS PVT and raw pseudorange/Doppler updates.
 
-This repository addresses the state estimation problem defined by task `SE 2317` for a reusable orbital stage during atmospheric entry. The task is defined by quantitative and operational criteria. During plasma blackout, GNSS becomes unavailable for forty seconds, inertial drift grows under thermal stress, and the vehicle must recover a controllable navigation solution within two seconds after signal reacquisition. Success depends on nominal accuracy, delay handling, observability management, covariance credibility, and bounded runtime.
+## Reference scenario
 
-The repository is a constrained estimator study with explicit dynamics, sensor timing, anomaly assumptions, and acceptance criteria. The vehicle follows six degree of freedom rigid body dynamics with aerodynamic control and RCS actuation across a strongly nonlinear entry regime from Mach two to Mach twelve. The IMU runs at four hundred hertz. GNSS runs at ten hertz and is fully unavailable from `t0 + 120 s` to `t0 + 160 s`. The star tracker runs at two hertz, arrives with a fixed delay of one hundred and twenty milliseconds, and is unavailable from `t0 + 130 s` to `t0 + 150 s`. The radar altimeter runs at twenty hertz, is delayed by seventy milliseconds, and is valid only below twenty five kilometres. Measurements may drop out, may contain heavy tailed outliers, and may arrive out of order.
+The command-line tools default to `SCENARIO=reference-entry`, an explicitly
+synthetic descending trajectory. The preview aerodynamic and RCS tables are not a
+calibrated full-flight model. `SCENARIO=legacy` retains the original trajectory;
+`SimConfig::default()` preserves that initial condition for library callers.
 
-## Estimator Design
+IMU/GNSS/star/radar rates are 400/10/2/20 Hz. Stars and radar have 120/70 ms delays.
+GNSS is absent during `[120,160) s`; stars are unavailable at measurement times
+`[130,150] s`. Radar is valid below 25 km. The default stress case includes 5%
+heavy-tailed contamination and 20% dropout. Truth noise and sensor random streams
+are independent of estimator tuning; paired modes share truth and IMU streams.
 
-The current implementation uses a 24 state error state square root EKF. The state carries position, velocity, attitude, angular rate, gyroscope bias, accelerometer bias, and residual aerodynamic force and torque terms. Covariance propagation remains in square root form through QR based updates so that numerical conditioning stays controlled during long blackout propagation and during aggressive measurement reacquisition. Translational propagation is strapdown IMU based. Truth propagation and filter side nominal linearization call the same nominal aerodynamic and RCS composition helper, which keeps the deterministic part of the dynamics aligned across simulation and estimation.
-
-Delay handling is a first class requirement in this implementation. Delayed or out of order measurements are applied through a fixed lag history buffer that performs rewind, update, and deterministic replay at the measurement timestamp. This mechanism is used for GNSS PVT, raw GNSS, star tracker, and radar updates. The result is a time aligned state and covariance history even when the arrival sequence differs from the physical sequence. For the blackout interval itself, the repository also includes fixed lag RTS smoothing so that information recovered after signal return can improve the estimate over the trailing segment of the unobservable window.
-
-The GNSS update path supports two observation models. The baseline mode uses position and velocity fixes. At blackout exit, the baseline path applies an immediate reacquisition update at the exit timestamp, and the reacquisition velocity covariance matches the standard PVT model. This keeps recovery window acceptance tied to the intended sensor model throughout the full two second window. The tighter mode uses pseudorange and Doppler directly. In that tighter mode, pseudorange rows never update velocity, and the Doppler weakest-direction projection is enabled only inside the two second recovery interval after blackout exit. Nominal pre blackout tracking therefore keeps the full Doppler information, while the most fragile part of recovery still receives explicit geometry protection. Robustness is further shaped by chi square gating, Student t style covariance inflation, optional innovation adaptive estimation, and a dedicated pre blackout accelerometer bias calibration path.
-
-## Acceptance and Verification
-
-The acceptance logic follows the mission window defined in `tasks.md`. Accuracy is evaluated only in the two second recovery interval immediately after blackout exit. The harness now computes per run acceptance from the maximum norm equivalent three sigma bounds over that interval: forty metres for position, zero point five metres per second for velocity, zero point fifteen degrees for attitude, zero point zero zero five degrees per second for gyroscope bias, and one hundred and twenty micro g for accelerometer bias. Recovery window RMS error metrics remain in the output as diagnostics. Accuracy alone is not sufficient. The repository also tracks NEES and NIS so that statistical consistency is assessed together with recovery performance.
-
-The harness default uses a ten second fixed lag history horizon and records the peak `Estimator::health()` history counters and memory estimate in the summary csv. The March 11, 2026 validation numbers documented in `verification.md` remain useful as a historical baseline, but they predate the current acceptance alignment and summary schema. Treat them as a comparison point until the full campaign is rerun under the current logic.
-
-## Build and Reproduction
-
-The repository targets stable Rust. A standard release build is sufficient for the benchmark harness and the diagnostics workflow.
+## Build and run
 
 ```bash
-cargo build --release
+cargo test --release --locked
+cargo test --release --locked --no-default-features --features flight
+cargo build --release --locked --bin harness --bin repro --bin resourcebench
+ASSESSMENT=causal TIGHT=1 OUT_DIR=output_tight target/release/harness 1000 --check
+ASSESSMENT=deadline OUT_DIR=output_pvt target/release/harness 1000 --check
+target/release/repro 0
+TIGHT=1 target/release/repro 0
+target/release/resourcebench --tight
 ```
 
-The default feature set includes simulation and diagnostics. A lean flight style build is available when only the core library is required.
+`--check` returns a nonzero status if the selected numerical assessment fails.
+`ASSESSMENT=causal` (default) checks 801 instantaneous outputs in `[160,162] s`.
+`ASSESSMENT=deadline` checks 201 retrospective checkpoints using only observations
+received by 162 s. Both results are always written separately; retrospective
+estimates must not be presented as instantaneous outputs.
 
-```bash
-cargo test --no-default-features --features flight
-```
+`SEED_OFFSET` selects the first batch seed. `scripts/validate-reference.sh`
+runs the test suites, both assessments, and the resource probes. Generated CSVs,
+plots, and logs belong in the ignored `output*` directories.
 
-The main benchmark entry point is the Monte Carlo harness. Running without environment switches uses the PVT path. Setting `TIGHT=1` enables raw pseudorange and Doppler updates.
+## Integration
 
-```bash
-cargo run --release --bin harness -- 500
-TIGHT=1 cargo run --release --bin harness -- 500
-```
+[Design](docs/design.md), [interfaces](docs/interface.md), and
+[verification](docs/verification.md) describe state/error conventions, noise
+units, recovery gates, replay requirements, and assessment definitions.
 
-Single seed reproduction is provided for failure analysis and regression tracking.
-
-```bash
-cargo run --release --bin repro -- 231
-TIGHT=1 cargo run --release --bin repro -- 231
-```
-
-When diagnosis is necessary, trace modes can be enabled for chronological inspection of propagation and measurement handling.
-
-```bash
-TRACE=1 cargo run --release --bin repro -- 206
-TRACE_GNSS=1 TIGHT=1 cargo run --release --bin repro -- 231
-```
-
-The harness writes summary csv files, phasewise consistency diagnostics, blockwise consistency diagnostics, post blackout window statistics, and svg figures into the configured output directory. The summary file includes recovery window RMS diagnostics, recovery window three sigma maxima, smoothed recovery RMS diagnostics, and peak history memory counters. When blackout trace recording is enabled, the recorder also carries position error, velocity error, position three sigma, velocity three sigma, and RV NEES on a common time grid so that recovery regressions can be localized without changing metric conventions.
-
-## Repository Layout
-
-The estimator implementation is organised under `src` with separate subtrees for propagation, measurement updates, history management, calibration, robustness support, and smoothing. The simulation and evaluation code is also under `src` and contains truth generation, sensor synthesis, Monte Carlo execution, and metric aggregation. `physics.rs` contains the shared nominal dynamics helper. `data.rs` loads the vehicle property, aerodynamic coefficient, and RCS preview tables from `data`. `types.rs` defines the public state and noise structures. `plot.rs` emits csv and svg artifacts when diagnostics are enabled.
-
-Three supplementary texts support the repository. `design.md` explains the estimator decisions and numerical safeguards. `interface.md` specifies timestamp conventions and flight style calling patterns. `verification.md` records the reproducible validation procedure and the current benchmark status. The typeset technical report in the report subdirectory under `docs` provides the longer mathematical and experimental narrative.
+`resourcebench` measures estimator allocations plus a reserved thread stack and
+reports wall-clock and Linux thread-CPU timing. RTS batch time is reported
+separately. Use `--check-time` on the ARM reference target to check the 5 ms wall
+budget; host measurements and this synthetic scenario are not flight certification.

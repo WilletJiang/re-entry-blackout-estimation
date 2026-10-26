@@ -2,33 +2,47 @@ use crate::data::{AeroCoeff, AeroTable};
 use crate::types::DynamicsParams;
 use nalgebra::{UnitQuaternion, Vector3};
 
+/// Lower US Standard Atmosphere, using geometric altitude in metres.
+/// Above 84.852 km geopotential altitude, use a continuous isothermal
+/// exponential extension; this is not a thermosphere model.
 pub fn isa_atmosphere(h_m: f64) -> (f64, f64) {
-    let h_m = h_m.max(0.0);
-    let (t, rho) = if h_m < 11_000.0 {
-        let t = 288.15 - 0.0065 * h_m;
-        let rho = 1.225 * (t / 288.15).powf(4.2561);
-        (t, rho)
-    } else if h_m < 20_000.0 {
-        let t = 216.65;
-        let exponent = -(h_m - 11_000.0) / 6341.62;
-        let rho = 0.36391 * exponent.exp();
-        (t, rho)
-    } else if h_m < 32_000.0 {
-        let t = 196.65 + 0.001 * (h_m - 20_000.0);
-        let rho = 0.08803 * (t / 216.65).powf(-34.1632);
-        (t, rho)
-    } else if h_m < 47_000.0 {
-        let t = 228.65 + 0.0028 * (h_m - 32_000.0);
-        let rho = 0.01322 * (t / 228.65).powf(-12.2011);
-        (t, rho)
-    } else {
-        let t = 270.65;
-        let exponent = -(h_m - 47_000.0) / 6341.62;
-        let rho = 0.00143 * exponent.exp();
-        (t, rho)
-    };
-    let a = (1.4 * 287.05287 * t).sqrt();
-    (rho.max(1e-6), a)
+    if !h_m.is_finite() {
+        return (f64::NAN, f64::NAN);
+    }
+    const R_GEO: f64 = 6_356_766.0;
+    const GAS: f64 = 287.05287;
+    const G0: f64 = 9.80665;
+    let height = h_m.max(0.0);
+    let geopotential = R_GEO * height / (R_GEO + height);
+    let boundaries = [
+        11_000.0, 20_000.0, 32_000.0, 47_000.0, 51_000.0, 71_000.0, 84_852.0,
+    ];
+    let lapse_rates = [-0.0065, 0.0, 0.001, 0.0028, 0.0, -0.0028, -0.002];
+    let mut temperature = 288.15;
+    let mut pressure = 101_325.0;
+    let mut base = 0.0;
+    for (boundary, lapse) in boundaries.into_iter().zip(lapse_rates) {
+        let top = geopotential.min(boundary);
+        let delta_h = top - base;
+        let next_temperature = temperature + lapse * delta_h;
+        pressure *= if lapse == 0.0 {
+            (-G0 * delta_h / (GAS * temperature)).exp()
+        } else {
+            (next_temperature / temperature).powf(-G0 / (GAS * lapse))
+        };
+        temperature = next_temperature;
+        base = top;
+        if geopotential <= boundary {
+            break;
+        }
+    }
+    if geopotential > base {
+        pressure *= (-G0 * (geopotential - base) / (GAS * temperature)).exp();
+    }
+    (
+        pressure / (GAS * temperature),
+        (1.4 * GAS * temperature).sqrt(),
+    )
 }
 
 pub struct AeroResult {
@@ -197,6 +211,26 @@ mod tests {
             }],
             n_a: 1,
             n_b: 1,
+        }
+    }
+
+    #[test]
+    fn atmosphere_matches_20km_reference_and_remains_continuous() {
+        // NASA/TM-2005-213659 Table A1: 216.65 K at 20 km geopotential altitude.
+        let geometric = |h: f64| 6_356_766.0 * h / (6_356_766.0 - h);
+        let (rho, sound) = super::isa_atmosphere(geometric(20_000.0));
+        assert!((rho - 0.08803).abs() < 1e-5);
+        assert!((sound - (1.4_f64 * 287.05287 * 216.65).sqrt()).abs() < 1e-9);
+        for boundary in [
+            11_000.0, 20_000.0, 32_000.0, 47_000.0, 51_000.0, 71_000.0, 84_852.0,
+        ] {
+            let h = geometric(boundary);
+            let (below, _) = super::isa_atmosphere(h - 0.001);
+            let (above, _) = super::isa_atmosphere(h + 0.001);
+            assert!(
+                (above / below - 1.0).abs() < 1e-5,
+                "density discontinuity at {h}"
+            );
         }
     }
 

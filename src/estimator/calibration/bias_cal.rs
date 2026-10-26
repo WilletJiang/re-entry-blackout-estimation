@@ -42,6 +42,7 @@ impl BiasCal {
 impl Estimator {
     pub fn set_precalibration(&mut self, enabled: bool, end_time: f64) {
         self.allow_bias_precalibration = enabled;
+        self.bias_cal.enabled = enabled;
         self.precalibration_end_time = end_time;
     }
 
@@ -183,6 +184,8 @@ impl Estimator {
         SnapshotInternal {
             bias_cal: self.bias_cal.clone(),
             gnss_reject_streak: self.gnss_reject_streak,
+            star_reject_streak: self.star_reject_streak,
+            star_reject_innovation: self.star_reject_innovation,
             robust_gate_alpha: self.robust_gate_alpha,
             robust_r_scale_cap: self.robust_r_scale_cap,
             robust_student_nu: self.robust_student_nu,
@@ -199,6 +202,8 @@ impl Estimator {
     pub(super) fn restore_internal(&mut self, internal: SnapshotInternal) {
         self.bias_cal = internal.bias_cal;
         self.gnss_reject_streak = internal.gnss_reject_streak;
+        self.star_reject_streak = internal.star_reject_streak;
+        self.star_reject_innovation = internal.star_reject_innovation;
         self.robust_gate_alpha = internal.robust_gate_alpha;
         self.robust_r_scale_cap = internal.robust_r_scale_cap;
         self.robust_student_nu = internal.robust_student_nu;
@@ -322,7 +327,7 @@ pub(super) fn initial_cov() -> MatN {
     for i in 3..6 {
         p[(i, i)] = (50.0_f64).powi(2);
     }
-    let att_var = (5_f64.to_radians()).powi(2);
+    let att_var = (1_f64.to_radians()).powi(2);
     for i in 6..9 {
         p[(i, i)] = att_var;
     }
@@ -334,7 +339,7 @@ pub(super) fn initial_cov() -> MatN {
     for i in 12..15 {
         p[(i, i)] = bg_var;
     }
-    let ba_var = (300e-6_f64 * 9.80665).powi(2);
+    let ba_var = (150e-6_f64 * 9.80665).powi(2);
     for i in 15..18 {
         p[(i, i)] = ba_var;
     }

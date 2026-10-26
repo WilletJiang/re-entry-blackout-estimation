@@ -32,6 +32,9 @@ impl Estimator {
         let r_cov = SMatrix::<f64, 1, 1>::new(meas.sigma * meas.sigma);
         let accepted = self.measurement_update(ROBUST_SENSOR_RADAR, z, h, r_cov, 1);
         if !accepted {
+            if record {
+                self.history.push_event(Event::Radar(meas));
+            }
             self.replay_tail(replay_events);
             return;
         }

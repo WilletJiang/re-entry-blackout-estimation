@@ -1,6 +1,6 @@
-use super::{math::chol_lower_with_enforce, Estimator, MatN, VecN};
+use super::{Estimator, MatN, VecN};
 use crate::util::enforce_pd;
-use nalgebra::UnitQuaternion;
+use nalgebra::{linalg::Cholesky, UnitQuaternion};
 
 impl Estimator {
     /// Smooth the estimator history over a fixed lag.
@@ -9,6 +9,22 @@ impl Estimator {
     /// function returns `None` when the history does not cover the requested lag
     /// or when the backward pass encounters a numerically unrecoverable step.
     pub fn rts_smooth(&self, lag_sec: f64) -> Option<(crate::types::State, MatN)> {
+        let mut oldest = None;
+        self.visit_smoothed(lag_sec, |state, cov| oldest = Some((state.clone(), *cov)))?;
+        oldest
+    }
+
+    /// Visit smoothed checkpoints newest first, using only data already received.
+    /// No history-sized workspace is allocated. A failed pass returns `None`;
+    /// callers must then discard any samples already delivered to the callback.
+    pub fn visit_smoothed(
+        &self,
+        lag_sec: f64,
+        mut visit: impl FnMut(&crate::types::State, &MatN),
+    ) -> Option<()> {
+        if !lag_sec.is_finite() || lag_sec < 0.0 {
+            return None;
+        }
         let n_snap = self.history.snapshots.len();
         if n_snap == 0 {
             return None;
@@ -17,31 +33,17 @@ impl Estimator {
         let target_t = newest.state.t - lag_sec;
         let target_idx = self.history.find_snapshot_index(target_t)?;
 
-        let mut p_f: Vec<MatN> = Vec::with_capacity(n_snap);
-        for snap in &self.history.snapshots {
-            let p = snap.l_cov * snap.l_cov.transpose();
-            p_f.push(p);
-        }
+        let mut smoothed_state = newest.state.clone();
+        let mut smoothed_cov = newest.l_cov * newest.l_cov.transpose();
 
-        let mut x_s: Vec<crate::types::State> = self
-            .history
-            .snapshots
-            .iter()
-            .map(|s| s.state.clone())
-            .collect();
-        let mut p_s: Vec<MatN> = p_f.clone();
-
-        if n_snap == 1 {
-            // The caller needs an owned state while the history buffer remains
-            // immutably borrowed for the duration of this method.
-            return Some((x_s[0].clone(), p_s[0]));
-        }
-
+        visit(&smoothed_state, &smoothed_cov);
         let newest_idx = n_snap - 1;
         let eye = MatN::identity();
         let zero = MatN::zeros();
 
-        for k in (0..newest_idx).rev() {
+        for k in (target_idx..newest_idx).rev() {
+            let snapshot = &self.history.snapshots[k];
+            let filtered_cov = snapshot.l_cov * snapshot.l_cov.transpose();
             let prop_k = if k < self.history.props.len() {
                 self.history.props[k].as_ref()
             } else {
@@ -53,36 +55,29 @@ impl Estimator {
                 (&eye, &zero)
             };
 
-            let mut p_pred = *phi_k * p_f[k] * phi_k.transpose() + *q_k;
+            let mut p_pred = *phi_k * filtered_cov * phi_k.transpose() + *q_k;
             enforce_pd(&mut p_pred);
-            let p_pred_inv = match p_pred.try_inverse() {
-                Some(inv) => inv,
-                None => {
-                    let l_pred = chol_lower_with_enforce(p_pred, "rts_smooth P_pred");
-                    let l_inv = l_pred.try_inverse()?;
-                    let l_inv_t = l_inv.transpose();
-                    l_inv_t * l_inv
-                }
-            };
-            let a_k = p_f[k] * phi_k.transpose() * p_pred_inv;
+            // Solve P_pred A^T = Phi P_filtered; avoid explicitly inverting
+            // a covariance whose translation and bias scales differ greatly.
+            let factor = Cholesky::new(p_pred)?;
+            let a_k = factor.solve(&(*phi_k * filtered_cov)).transpose();
 
             let predicted_next_state = if let Some(prop_record) = prop_k {
                 &prop_record.predicted_end_state
             } else {
                 &self.history.snapshots[k + 1].state
             };
-            let dx_next = state_error(&x_s[k + 1], predicted_next_state);
+            let dx_next = state_error(&smoothed_state, predicted_next_state);
             let dx = a_k * dx_next;
-            x_s[k] = vec_to_state(&self.history.snapshots[k].state, dx);
+            smoothed_state = vec_to_state(&snapshot.state, dx);
 
-            let mut p_new = p_f[k] + a_k * (p_s[k + 1] - p_pred) * a_k.transpose();
+            let mut p_new = filtered_cov + a_k * (smoothed_cov - p_pred) * a_k.transpose();
             enforce_pd(&mut p_new);
-            p_s[k] = p_new;
+            smoothed_cov = p_new;
+            visit(&smoothed_state, &smoothed_cov);
         }
 
-        // The caller needs an owned state while the history buffer remains
-        // immutably borrowed for the duration of this method.
-        Some((x_s[target_idx].clone(), p_s[target_idx]))
+        Some(())
     }
 }
 

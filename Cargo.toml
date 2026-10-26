@@ -58,3 +58,8 @@ codegen-units = 1
 panic = "abort"
 debug = false
 incremental = false
+
+[[bin]]
+name = "resourcebench"
+path = "src/bin/resourcebench.rs"
+required-features = ["diagnostics"]

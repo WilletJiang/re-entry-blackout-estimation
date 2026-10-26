@@ -15,12 +15,14 @@ impl SimRun {
         if !in_recovery_window(t, &self.cfg) {
             return;
         }
+        self.recovery_coverage.record(t, self.cfg.dt);
         let pos_err = self.est.state.r - self.truth.r;
         let vel_err = self.est.state.v - self.truth.v;
         self.pos_err2_acc += pos_err.norm_squared();
         self.vel_err2_acc += vel_err.norm_squared();
         let dq = self.est.state.q * self.truth.q.inverse();
         self.att_err2_acc += dq.angle().powi(2);
+        self.omega_err2_acc += (self.est.state.omega - self.truth.omega).norm_squared();
         if self.trace && (step % 200 == 0) {
             eprintln!(
                 "[t={:.3}] |pos_err|={:.3} m |vel_err|={:.3} m/s",
@@ -36,6 +38,25 @@ impl SimRun {
         self.err_samples += 1.0;
 
         let p = self.est.cov();
+        self.recovery
+            .push(crate::sim::campaign::RecoverySample::new(
+                &self.truth,
+                &self.est.state,
+                &p,
+            ));
+        self.recovery_numerically_valid &= state_is_finite(&self.est.state)
+            && state_is_finite(&self.truth)
+            && p.iter().all(|v| v.is_finite())
+            && [
+                self.pos_err2_acc,
+                self.vel_err2_acc,
+                self.att_err2_acc,
+                self.omega_err2_acc,
+                self.bg_err2_acc,
+                self.ba_err2_acc,
+            ]
+            .iter()
+            .all(|v| v.is_finite());
         self.pos_sigma3_max_m = self.pos_sigma3_max_m.max(sigma3_norm_from_cov(
             &p.fixed_view::<3, 3>(0, 0).into_owned(),
         ));
@@ -45,6 +66,9 @@ impl SimRun {
         self.att_sigma3_max_deg = self
             .att_sigma3_max_deg
             .max(sigma3_norm_from_cov(&p.fixed_view::<3, 3>(6, 6).into_owned()).to_degrees());
+        self.omega_sigma3_max_dps = self
+            .omega_sigma3_max_dps
+            .max(sigma3_norm_from_cov(&p.fixed_view::<3, 3>(9, 9).into_owned()).to_degrees());
         self.bg_sigma3_max_dps = self
             .bg_sigma3_max_dps
             .max(sigma3_norm_from_cov(&p.fixed_view::<3, 3>(12, 12).into_owned()).to_degrees());
@@ -53,7 +77,40 @@ impl SimRun {
         );
     }
 
+    pub(super) fn capture_recovery_at_deadline(&mut self) {
+        let deadline = self.cfg.blackout_end + 2.0;
+        if (self.est.state.t - deadline).abs() > 1e-8 {
+            return;
+        }
+        let mut samples = Vec::with_capacity(201);
+        let success = self.est.visit_smoothed(2.0, |state, covariance| {
+            if !in_recovery_window(state.t, &self.cfg)
+                || (state.t * 100.0 - (state.t * 100.0).round()).abs() > 1e-6
+            {
+                return;
+            }
+            // All checkpoint times are on the 400 Hz truth grid. The same
+            // tolerance used for delayed sensors prevents an off-by-one frame.
+            if let Some((lo, hi, _)) = metrics::truth_bracket(&self.truth_times, state.t) {
+                if lo == hi {
+                    samples.push(crate::sim::campaign::RecoverySample::new(
+                        &self.truth_hist[lo],
+                        state,
+                        covariance,
+                    ));
+                }
+            }
+        });
+        if success.is_some() {
+            samples.reverse();
+            self.recovery_at_deadline = samples;
+        }
+    }
+
     pub(super) fn accumulate_smoothed_recovery_window_stats(&mut self) {
+        if !self.cfg.enable_smoothing_diagnostics {
+            return;
+        }
         let current_t = self.est.state.t;
         if current_t + 1.0e-9 < self.cfg.history_sec {
             return;
@@ -127,12 +184,17 @@ impl SimRun {
         let sm_rms_pos = rms_from_accumulator(self.sm_pos_err2_acc, self.sm_samples);
         let sm_rms_vel = rms_from_accumulator(self.sm_vel_err2_acc, self.sm_samples);
 
-        let pass = self.err_samples > 0.0
-            && self.pos_sigma3_max_m <= 40.0
-            && self.vel_sigma3_max_mps <= 0.5
-            && self.att_sigma3_max_deg <= 0.15
-            && self.bg_sigma3_max_dps <= 0.005
-            && self.ba_sigma3_max_ug <= 120.0;
+        let recovery_window_complete = self.recovery_coverage.complete(&self.cfg, self.est.state.t);
+        let pass = recovery_window_complete
+            && self.recovery_numerically_valid
+            && passes_covariance_limits([
+                self.pos_sigma3_max_m,
+                self.vel_sigma3_max_mps,
+                self.att_sigma3_max_deg,
+                self.omega_sigma3_max_dps,
+                self.bg_sigma3_max_dps,
+                self.ba_sigma3_max_ug,
+            ]);
 
         if std::env::var("TRACE").ok().is_some() {
             eprintln!(
@@ -150,6 +212,18 @@ impl SimRun {
             phase_means_and_cov(self.nis_phase_acc, self.nis_phase_ct, self.nis_phase_hit);
 
         let result = MonteCarloResult {
+            recovery: self.recovery,
+            recovery_at_deadline: self.recovery_at_deadline,
+            aux_nis: self.aux_nis,
+            nis_count: self.nis_ct,
+            nis_hits: self.nis_hit,
+            seed: self.seed,
+            trajectory: self.trajectory,
+            recovery_samples: self.recovery_coverage.samples,
+            recovery_window_complete,
+            recovery_numerically_valid: self.recovery_numerically_valid,
+            rms_omega_dps: rms_from_accumulator(self.omega_err2_acc, self.err_samples).to_degrees(),
+            sigma3_omega_max_dps: self.omega_sigma3_max_dps,
             rms_pos,
             rms_vel,
             rms_att_deg,
@@ -224,8 +298,10 @@ fn rms_from_accumulator(sum_sq: f64, samples: f64) -> f64 {
 }
 
 fn sigma3_norm_from_cov(cov: &Matrix3<f64>) -> f64 {
-    let trace = cov.trace().max(0.0);
-    3.0 * trace.sqrt()
+    if !cov.iter().all(|v| v.is_finite()) || cov.diagonal().iter().any(|v| *v < 0.0) {
+        return f64::INFINITY;
+    }
+    3.0 * cov.trace().sqrt()
 }
 
 fn truth_state_at_or_before<'a>(
@@ -413,4 +489,57 @@ fn nees_3(err: &Vector3<f64>, p: &Matrix3<f64>) -> Option<f64> {
     let x = ch.solve(err);
     let v = err.dot(&x);
     v.is_finite().then_some(v)
+}
+
+fn passes_covariance_limits(maxima: [f64; 6]) -> bool {
+    maxima
+        .into_iter()
+        .zip([40.0, 0.5, 0.15, 0.05, 0.005, 120.0])
+        .all(|(value, limit)| value.is_finite() && value >= 0.0 && value <= limit)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_six_limits_are_enforced_and_nonfinite_values_fail() {
+        let limits = [40.0, 0.5, 0.15, 0.05, 0.005, 120.0];
+        assert!(passes_covariance_limits(limits));
+        for i in 0..6 {
+            for bad in [limits[i] * 1.01, f64::NAN, f64::INFINITY, -1.0] {
+                let mut values = limits;
+                values[i] = bad;
+                assert!(!passes_covariance_limits(values));
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_covariance_cannot_be_hidden_by_maximum_accumulation() {
+        for bad in [f64::NAN, f64::INFINITY, -1.0] {
+            let mut cov = Matrix3::identity();
+            cov[(0, 0)] = bad;
+            assert!(0.0_f64.max(sigma3_norm_from_cov(&cov)).is_infinite());
+        }
+        let mut cov = Matrix3::identity();
+        cov[(0, 1)] = f64::NAN;
+        assert!(sigma3_norm_from_cov(&cov).is_infinite());
+    }
+}
+
+pub(super) fn state_is_finite(state: &crate::types::State) -> bool {
+    state.t.is_finite()
+        && state.q.quaternion().coords.iter().all(|v| v.is_finite())
+        && [
+            &state.r,
+            &state.v,
+            &state.omega,
+            &state.bg,
+            &state.ba,
+            &state.aero_res_force,
+            &state.aero_res_torque,
+        ]
+        .into_iter()
+        .all(|vector| vector.iter().all(|v| v.is_finite()))
 }

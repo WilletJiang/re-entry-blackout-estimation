@@ -6,7 +6,7 @@ const RADAR_OUTLIER_SCALE_M: f64 = 10.0;
 
 impl SimRun {
     pub(super) fn maybe_radar(&mut self, t: f64) {
-        if t < self.next_radar {
+        if t + 1e-9 < self.next_radar {
             return;
         }
         self.next_radar += 1.0 / self.cfg.radar_rate;
@@ -23,22 +23,28 @@ impl SimRun {
             &self.truth,
         );
         if alt_true >= self.cfg.radar_max_alt
-            || self.rng.gen_range(0.0..1.0) <= self.cfg.dropout_rate
+            || self.radar_rng.gen_range(0.0..1.0) <= self.cfg.dropout_rate
         {
             return;
         }
         let alt_meas = alt_true
-            + if self.rng.gen_range(0.0..1.0) < self.cfg.outlier_rate {
+            + if self.radar_rng.gen_range(0.0..1.0) < self.cfg.outlier_rate {
                 cauchy_with_scale(RADAR_OUTLIER_SCALE_M, "radar altitude outlier scale")
-                    .sample(&mut self.rng)
+                    .sample(&mut self.radar_rng)
             } else {
-                1.0 * self.standard_normal.sample(&mut self.rng)
+                1.0 * self.standard_normal.sample(&mut self.radar_rng)
             };
         self.est.update_radar(crate::estimator::RadarMeas {
             t: meas_time,
             alt: alt_meas,
             sigma: 1.0,
         });
+        let d2 = self
+            .est
+            .last_radar_base_nis
+            .filter(|(t, _, _)| (*t - meas_time).abs() < 1e-8)
+            .map_or(f64::NAN, |(_, d, _)| d);
+        self.aux_nis[1].record(d2, 1);
     }
 }
 
@@ -58,15 +64,9 @@ fn truth_alt_at(
     radius_earth: f64,
     truth: &crate::types::State,
 ) -> f64 {
-    let idx = times
-        .iter()
-        .enumerate()
-        .rev()
-        .find(|(_, &ti)| ti <= t_target)
-        .map(|(i, _)| i)
-        .unwrap_or(times.len().saturating_sub(1));
-    if idx < hist.len() {
-        return hist[idx].r.norm() - radius_earth;
-    }
-    truth.r.norm() - radius_earth
+    let Some((lower, upper, weight)) = crate::sim::metrics::truth_bracket(times, t_target) else {
+        return truth.r.norm() - radius_earth;
+    };
+    let position = hist[lower].r * (1.0 - weight) + hist[upper].r * weight;
+    position.norm() - radius_earth
 }

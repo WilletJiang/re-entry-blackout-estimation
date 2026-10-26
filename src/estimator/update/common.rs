@@ -19,6 +19,9 @@ impl Estimator {
         };
         let base_s_inv = base_s_chol.inverse();
         let base_d2 = (innov.transpose() * base_s_inv * innov)[(0, 0)];
+        if sensor_id == super::robust::ROBUST_SENSOR_RADAR {
+            self.last_radar_base_nis = Some((self.state.t, base_d2, dof));
+        }
         let r = self.robust_scale(sensor_id, dof, base_d2, r);
 
         let s = h.clone() * p.clone() * h.transpose() + r;
@@ -36,11 +39,7 @@ impl Estimator {
         let k = p * h.transpose() * s_inv;
         let dx = k * innov;
 
-        let mut dx_no_bias = dx.clone();
-        for i in 12..18 {
-            dx_no_bias[i] = 0.0;
-        }
-        self.apply_state_error(dx_no_bias);
+        self.apply_state_error(dx);
         let i_kh = MatN::identity() - k * h;
         let mut p_new = i_kh * p * i_kh.transpose() + k * r * k.transpose();
         enforce_pd(&mut p_new);

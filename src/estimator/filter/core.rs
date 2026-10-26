@@ -32,6 +32,9 @@ impl Estimator {
             aero_force_rw_blackout: None,
             aero_torque_rw_blackout: None,
             last_gnss_nis: None,
+            last_gnss_base_nis: None,
+            last_star_base_nis: None,
+            last_radar_base_nis: None,
             last_gnss_prior_t: None,
             last_gnss_prior_rv_p: None,
             last_gnss_prior_r: None,
@@ -42,6 +45,8 @@ impl Estimator {
             last_gnss_post_v: None,
             last_gnss_accepted: None,
             gnss_reject_streak: 0,
+            star_reject_streak: 0,
+            star_reject_innovation: None,
             robust_gate_alpha: None,
             robust_r_scale_cap: super::robust::DEFAULT_R_SCALE_CAP,
             robust_student_nu: 0.0,
@@ -51,9 +56,9 @@ impl Estimator {
             last_v_meas: None,
             learned_aero_correction: Vector3::zeros(),
             aero_learning_rate: 0.02,
-            allow_bias_precalibration: true,
+            allow_bias_precalibration: false,
             precalibration_end_time: 120.0,
-            bias_cal: bias_cal::BiasCal::new(true),
+            bias_cal: bias_cal::BiasCal::new(false),
         };
 
         est.history.push_snapshot(Snapshot {
@@ -73,6 +78,9 @@ impl Estimator {
         EstimatorHealth {
             t: self.state.t,
             last_gnss_nis: self.last_gnss_nis,
+            last_gnss_base_nis: self.last_gnss_base_nis,
+            last_star_base_nis: self.last_star_base_nis,
+            last_radar_base_nis: self.last_radar_base_nis,
             last_gnss_accepted: self.last_gnss_accepted,
             gnss_reject_streak: self.gnss_reject_streak,
             history_snapshots: self.history.snapshots.len(),

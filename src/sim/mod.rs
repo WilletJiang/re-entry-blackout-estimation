@@ -1,15 +1,33 @@
+pub mod campaign;
 mod gps;
+pub mod innovation;
 mod metrics;
 mod run;
+pub mod scenario;
+mod trajectory;
+mod truth;
+
+pub use trajectory::TrajectoryDiagnostics;
+pub use truth::TruthNoise;
 
 pub use run::{run_monte_carlo, simulate_single};
 pub use run::{run_monte_carlo_with_trace, simulate_single_with_trace, MonteCarloTraceResult};
 
 #[derive(Clone)]
 pub struct SimConfig {
+    /// Starting seed for batch calls; single-run calls use their seed argument.
+    pub seed_offset: u64,
+    /// Physical noise is held fixed when estimator tuning changes.
+    pub truth_noise: TruthNoise,
+    /// Optional independently supplied initial state; None preserves the legacy trajectory.
+    pub initial_truth: Option<crate::types::State>,
+    /// Optional independent per-axis initial bias jitter (rad/s, m/s^2).
+    pub initial_bias_jitter: Option<(f64, f64)>,
     pub dt: f64,
     pub t_final: f64,
     pub history_sec: f64,
+    /// Optional legacy ten-second-lag RMS diagnostics, separate from the deadline assessment.
+    pub enable_smoothing_diagnostics: bool,
     pub blackout_start: f64,
     pub blackout_end: f64,
     pub gnss_rate: f64,
@@ -56,9 +74,14 @@ pub struct BlackoutTrace {
 impl Default for SimConfig {
     fn default() -> Self {
         SimConfig {
+            seed_offset: 0,
+            truth_noise: TruthNoise::default(),
+            initial_truth: None,
+            initial_bias_jitter: None,
             dt: 0.0025,
             t_final: 180.0,
             history_sec: 10.0,
+            enable_smoothing_diagnostics: false,
             blackout_start: 120.0,
             blackout_end: 160.0,
             gnss_rate: 10.0,
@@ -69,7 +92,8 @@ impl Default for SimConfig {
             dropout_rate: 0.20,
             tuning: None,
             use_tight_coupling: false,
-            star_convergence_count: 4,
+            // GNSS is available from startup, independently of star acquisition.
+            star_convergence_count: 0,
             enable_aero_learning: false,
             bias_jump: None,
         }
@@ -95,12 +119,26 @@ pub struct BiasJumpConfig {
 
 #[derive(Clone)]
 pub struct MonteCarloResult {
+    pub recovery: Vec<campaign::RecoverySample>,
+    /// 100 Hz checkpoint estimates for [exit,exit+2], conditioned only on data
+    /// received by exit+2. These are retrospective, not instantaneous outputs.
+    pub recovery_at_deadline: Vec<campaign::RecoverySample>,
+    pub aux_nis: [innovation::InnovationStats; 2],
+    pub nis_count: usize,
+    pub nis_hits: usize,
+    pub seed: u64,
+    pub trajectory: TrajectoryDiagnostics,
+    pub recovery_samples: usize,
+    pub recovery_window_complete: bool,
+    pub recovery_numerically_valid: bool,
     pub rms_pos: f64,
     pub rms_vel: f64,
     pub rms_att_deg: f64,
+    pub rms_omega_dps: f64,
     pub sigma3_pos_max_m: f64,
     pub sigma3_vel_max_mps: f64,
     pub sigma3_att_max_deg: f64,
+    pub sigma3_omega_max_dps: f64,
     pub sigma3_bg_max_dps: f64,
     pub sigma3_ba_max_ug: f64,
     pub nees_mean: f64,
@@ -141,5 +179,6 @@ pub struct MonteCarloResult {
     pub history_events: usize,
     pub history_props: usize,
     pub history_capacity_bytes: usize,
+    /// Complete, finite recovery-window covariance screen; not full task compliance.
     pub passed: bool,
 }

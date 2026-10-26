@@ -4,8 +4,11 @@ mod init;
 mod propagation;
 mod radar;
 mod star;
+#[cfg(test)]
+mod tests;
 mod trace;
 
+use super::truth::seeded_stream;
 use super::{
     gps, metrics, BiasJumpConfig, BlackoutTrace, BlackoutTraceConfig, MonteCarloResult, SimConfig,
 };
@@ -15,7 +18,6 @@ use crate::physics::nominal_body_dynamics_with_residual;
 use crate::types::{DynamicsParams, NoiseParams, State};
 use nalgebra::{Matrix3, Vector3};
 use rand::rngs::StdRng;
-use rand::SeedableRng;
 use rand_distr::{Distribution, Normal};
 use std::sync::Arc;
 
@@ -23,7 +25,6 @@ const CHI2_6_LO: f64 = 1.237_344_245_791_202_5_f64;
 const CHI2_6_HI: f64 = 14.449_375_335_447_918_f64;
 const CHI2_3_LO: f64 = 0.215_795_282_623_897_94_f64;
 const CHI2_3_HI: f64 = 9.348_403_604_496_145_f64;
-const Z_95: f64 = 1.959_963_984_540_054_f64;
 
 fn bias_jump_vectors(
     cfg: Option<BiasJumpConfig>,
@@ -66,7 +67,9 @@ pub fn run_monte_carlo(
         .into_par_iter()
         .map(|seed| {
             simulate_single(
-                seed as u64,
+                cfg.seed_offset
+                    .checked_add(seed as u64)
+                    .expect("seed range overflow"),
                 dyn_params.clone(),
                 noise.clone(),
                 aero.clone(),
@@ -98,7 +101,9 @@ pub fn run_monte_carlo_with_trace(
         .into_par_iter()
         .map(|seed| {
             simulate_single_with_trace(
-                seed as u64,
+                cfg.seed_offset
+                    .checked_add(seed as u64)
+                    .expect("seed range overflow"),
                 dyn_params.clone(),
                 noise.clone(),
                 aero.clone(),
@@ -142,12 +147,21 @@ pub fn simulate_single_with_trace(
 }
 
 struct SimRun {
-    rng: StdRng,
+    seed: u64,
+    trajectory: super::TrajectoryDiagnostics,
+    recovery: Vec<super::campaign::RecoverySample>,
+    recovery_at_deadline: Vec<super::campaign::RecoverySample>,
+    recovery_coverage: metrics::RecoveryCoverage,
+    recovery_numerically_valid: bool,
+    truth_rng: StdRng,
+    imu_rng: StdRng,
+    gnss_rng: StdRng,
+    star_rng: StdRng,
+    radar_rng: StdRng,
     standard_normal: Normal<f64>,
     trace: bool,
     no_star: bool,
     dyn_params: DynamicsParams,
-    noise: NoiseParams,
     aero: Arc<AeroTable>,
     rcs: Arc<RcsTorqueSeries>,
     cfg: SimConfig,
@@ -156,9 +170,9 @@ struct SimRun {
     next_gnss: f64,
     next_star: f64,
     next_radar: f64,
-    gnss_reacq_done: bool,
     bias_cal_applied: bool,
     star_update_count: usize,
+    aux_nis: [super::innovation::InnovationStats; 2],
     nis_acc: f64,
     nis_ct: usize,
     nis_hit: usize,
@@ -168,12 +182,14 @@ struct SimRun {
     pos_err2_acc: f64,
     vel_err2_acc: f64,
     att_err2_acc: f64,
+    omega_err2_acc: f64,
     err_samples: f64,
     bg_err2_acc: f64,
     ba_err2_acc: f64,
     pos_sigma3_max_m: f64,
     vel_sigma3_max_mps: f64,
     att_sigma3_max_deg: f64,
+    omega_sigma3_max_dps: f64,
     bg_sigma3_max_dps: f64,
     ba_sigma3_max_ug: f64,
     sm_pos_err2_acc: f64,
@@ -212,7 +228,17 @@ impl SimRun {
         cfg: SimConfig,
         trace_cfg: Option<BlackoutTraceConfig>,
     ) -> Self {
-        let mut rng = StdRng::seed_from_u64(0xBADA55 + seed);
+        assert!(
+            cfg.dt.is_finite() && cfg.dt > 0.0,
+            "dt must be finite and positive"
+        );
+        assert!(
+            cfg.t_final.is_finite() && cfg.t_final >= 0.0,
+            "t_final must be finite and nonnegative"
+        );
+        let mut initial_rng = seeded_stream(seed, 0);
+        let mut estimate_rng = seeded_stream(seed, 1);
+        let mut fault_rng = seeded_stream(seed, 2);
         let standard_normal = Normal::new(0.0, 1.0).unwrap();
         let trace = std::env::var("TRACE").ok().is_some();
         let no_star = std::env::var("NO_STAR").ok().is_some();
@@ -238,14 +264,22 @@ impl SimRun {
         if cfg.enable_aero_learning {
             est.enable_aero_learning(0.02);
         }
-        est.set_precalibration(true, cfg.blackout_start);
+        est.set_precalibration(false, cfg.blackout_start);
 
-        let truth = init::init_truth_state(&dyn_params, &standard_normal, &mut rng);
-        init::init_est_state(&mut est, &truth, &standard_normal, &mut rng);
+        let mut truth = cfg.initial_truth.clone().unwrap_or_else(|| {
+            init::init_truth_state(&dyn_params, &standard_normal, &mut initial_rng)
+        });
+        assert!(truth.t == 0.0, "initial truth timestamp must be zero");
+        if let Some((gyro_sigma, accel_sigma)) = cfg.initial_bias_jitter {
+            truth.bg += super::truth::normal_vector(&mut initial_rng) * gyro_sigma;
+            truth.ba += super::truth::normal_vector(&mut initial_rng) * accel_sigma;
+        }
+        init::init_est_state(&mut est, &truth, &standard_normal, &mut estimate_rng);
         let initial_health = est.health();
 
         let bias_jump = cfg.bias_jump;
-        let (bias_jump_bg, bias_jump_ba) = bias_jump_vectors(bias_jump, &standard_normal, &mut rng);
+        let (bias_jump_bg, bias_jump_ba) =
+            bias_jump_vectors(bias_jump, &standard_normal, &mut fault_rng);
 
         let total_steps = (cfg.t_final / cfg.dt) as usize;
         let nees_cap = (cfg.t_final * cfg.gnss_rate).ceil() as usize + 16;
@@ -259,24 +293,35 @@ impl SimRun {
 
         let blackout_trace = trace_cfg.map(|tc| trace::TraceRecorder::new(&cfg, tc));
 
+        let mut trajectory = super::TrajectoryDiagnostics::new(&truth, &dyn_params);
+        trajectory.record(&truth, &dyn_params, &aero, cfg.radar_max_alt);
         Self {
-            rng,
+            seed,
+            trajectory,
+            recovery: Vec::new(),
+            recovery_at_deadline: Vec::new(),
+            recovery_coverage: metrics::RecoveryCoverage::default(),
+            recovery_numerically_valid: true,
+            truth_rng: seeded_stream(seed, 3),
+            imu_rng: seeded_stream(seed, 4),
+            gnss_rng: seeded_stream(seed, 5),
+            star_rng: seeded_stream(seed, 6),
+            radar_rng: seeded_stream(seed, 7),
             standard_normal,
             trace,
             no_star,
             dyn_params,
-            noise,
             aero,
             rcs,
-            cfg,
+            cfg: cfg.clone(),
             est,
             truth,
-            next_gnss: 0.0,
+            next_gnss: 1.0 / cfg.gnss_rate,
             next_star: 0.0,
             next_radar: 0.0,
-            gnss_reacq_done: false,
             bias_cal_applied: false,
             star_update_count: 0,
+            aux_nis: [super::innovation::InnovationStats::default(); 2],
             nis_acc: 0.0,
             nis_ct: 0,
             nis_hit: 0,
@@ -286,12 +331,14 @@ impl SimRun {
             pos_err2_acc: 0.0,
             vel_err2_acc: 0.0,
             att_err2_acc: 0.0,
+            omega_err2_acc: 0.0,
             err_samples: 0.0,
             bg_err2_acc: 0.0,
             ba_err2_acc: 0.0,
             pos_sigma3_max_m: 0.0,
             vel_sigma3_max_mps: 0.0,
             att_sigma3_max_deg: 0.0,
+            omega_sigma3_max_dps: 0.0,
             bg_sigma3_max_dps: 0.0,
             ba_sigma3_max_ug: 0.0,
             sm_pos_err2_acc: 0.0,
@@ -346,12 +393,26 @@ impl SimRun {
         );
         self.propagate_estimator(t, tau_b, f_b, &nominal_truth);
         self.propagate_truth(&nominal_truth);
+        self.cfg
+            .truth_noise
+            .advance_biases(&mut self.truth, self.cfg.dt, &mut self.truth_rng);
+        self.truth.t = t + self.cfg.dt;
         self.record_truth(t + self.cfg.dt);
+        self.trajectory.record(
+            &self.truth,
+            &self.dyn_params,
+            &self.aero,
+            self.cfg.radar_max_alt,
+        );
         self.maybe_apply_bias_calibration(t + self.cfg.dt);
         self.maybe_gnss(t);
-        self.maybe_star(t);
-        self.maybe_radar(t);
+        self.maybe_star(t + self.cfg.dt);
+        self.maybe_radar(t + self.cfg.dt);
+        self.recovery_numerically_valid &= finish::state_is_finite(&self.est.state)
+            && self.est.l_cov.iter().all(|v| v.is_finite())
+            && self.est.l_cov.diagonal().iter().all(|v| *v > 0.0);
         self.accumulate_recovery_window_stats(step);
+        self.capture_recovery_at_deadline();
         self.accumulate_smoothed_recovery_window_stats();
         self.record_health_peak();
         self.maybe_record_trace(step);

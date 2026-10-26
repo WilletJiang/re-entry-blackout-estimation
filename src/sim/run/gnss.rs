@@ -1,4 +1,4 @@
-use super::{gps, metrics, SimRun, CHI2_6_HI, CHI2_6_LO, Z_95};
+use super::{gps, metrics, SimRun};
 use crate::estimator::{GnssMeas, GpsRawMeas, GpsSatMeas};
 use nalgebra::{linalg::Cholesky, Matrix3, Matrix6, SVector, Vector3};
 use rand::Rng;
@@ -6,7 +6,6 @@ use rand_distr::{Cauchy, Distribution};
 
 const POS_SIGMA_M: f64 = 1.9;
 const PVT_VEL_SIGMA_MPS: f64 = 0.08;
-const TIGHT_REACQ_VEL_SIGMA_MPS: f64 = 0.02;
 const TIGHT_RANGE_RATE_SIGMA_MPS: f64 = 0.02;
 const PVT_OUTLIER_SCALE_M: f64 = 200.0;
 const TIGHT_PSEUDORANGE_OUTLIER_SCALE_M: f64 = 50.0;
@@ -20,37 +19,22 @@ impl SimRun {
         let mut sat_count_meas = 0usize;
         let mut sat_sig_v_ls = None;
 
-        if self.should_force_blackout_exit_reacquisition() {
-            self.gnss_reacquire(self.cfg.blackout_end);
-            self.gnss_reacq_done = true;
-            gnss_updated = true;
-            gnss_update_time = Some(self.cfg.blackout_end);
-        }
-
-        if t < self.next_gnss {
-            if gnss_update_time.is_some() {
-                self.finish_gnss_step(
-                    gnss_updated,
-                    gnss_update_time,
-                    self.cfg.blackout_end,
-                    sat_count_meas,
-                    sat_sig_v_ls,
-                );
-            }
+        let t = t + self.cfg.dt;
+        if t + FLOAT_TIME_TOL_SEC < self.next_gnss {
             return;
         }
         self.next_gnss += 1.0 / self.cfg.gnss_rate;
 
-        let t_meas = t + self.cfg.dt;
+        let t_meas = t;
         let in_blackout = t_meas >= self.cfg.blackout_start - FLOAT_TIME_TOL_SEC
             && t_meas + FLOAT_TIME_TOL_SEC < self.cfg.blackout_end;
         let allow_gnss = self.star_update_count >= self.cfg.star_convergence_count
             || t_meas >= self.cfg.blackout_start;
 
         let meas_considered =
-            allow_gnss && !in_blackout && self.rng.gen_range(0.0..1.0) > self.cfg.dropout_rate;
+            allow_gnss && !in_blackout && self.gnss_rng.gen_range(0.0..1.0) > self.cfg.dropout_rate;
         if meas_considered {
-            if self.gnss_reacq_done || t_meas < self.cfg.blackout_end - FLOAT_TIME_TOL_SEC {
+            {
                 let (updated, sat_count, sat_sig) = self.gnss_update_normal(t_meas);
                 gnss_updated = updated;
                 gnss_update_time = updated.then_some(t_meas);
@@ -66,10 +50,6 @@ impl SimRun {
             sat_count_meas,
             sat_sig_v_ls,
         );
-    }
-
-    fn should_force_blackout_exit_reacquisition(&self) -> bool {
-        !self.gnss_reacq_done && self.est.state.t >= self.cfg.blackout_end - FLOAT_TIME_TOL_SEC
     }
 
     fn finish_gnss_step(
@@ -94,9 +74,7 @@ impl SimRun {
                 sat_count_meas,
                 sat_sig_v_ls,
             );
-            if gnss_accepted {
-                self.accumulate_nis(update_time);
-            }
+            self.accumulate_nis(update_time);
             self.trace_bias_near_boundaries(update_time);
             self.record_nees_sample(update_time, gnss_accepted);
             return;
@@ -137,31 +115,6 @@ impl SimRun {
         }
     }
 
-    fn gnss_reacquire(&mut self, t_meas: f64) {
-        let vel_sigma_mps = if self.cfg.use_tight_coupling {
-            TIGHT_REACQ_VEL_SIGMA_MPS
-        } else {
-            PVT_VEL_SIGMA_MPS
-        };
-        let meas = self.sample_pvt_measurement(t_meas, vel_sigma_mps, false);
-
-        if let Some(tune) = self.cfg.tuning {
-            self.est
-                .inflate_rv_record(tune.reacq_pos_scale, tune.reacq_vel_scale);
-        } else {
-            self.est.inflate_rv_record(1000.0, 100.0);
-        }
-        self.est.update_gnss(meas);
-        if std::env::var("TRACE").ok().is_some() {
-            let est_ba = self.est.state.ba / 9.80665 * 1.0e6;
-            let tru_ba = self.truth.ba / 9.80665 * 1.0e6;
-            eprintln!(
-                "[BA] t={:.3} est_ba_ug=({:.1},{:.1},{:.1}) truth_ba_ug=({:.1},{:.1},{:.1})",
-                t_meas, est_ba.x, est_ba.y, est_ba.z, tru_ba.x, tru_ba.y, tru_ba.z
-            );
-        }
-    }
-
     fn gnss_update_normal(&mut self, t_meas: f64) -> (bool, usize, Option<Vector3<f64>>) {
         if self.cfg.use_tight_coupling {
             return self.gnss_update_tight(t_meas);
@@ -175,24 +128,24 @@ impl SimRun {
         if sats.len() < 4 {
             return (false, 0, None);
         }
-        let is_outlier = self.rng.gen_range(0.0..1.0) < self.cfg.outlier_rate;
+        let is_outlier = self.gnss_rng.gen_range(0.0..1.0) < self.cfg.outlier_rate;
         let mut sat_meas = Vec::with_capacity(sats.len());
         let mut info_v = Matrix3::<f64>::zeros();
         for (sat_pos, sat_vel) in sats {
             let true_range = (sat_pos - self.truth.r).norm();
             let true_rr = (sat_vel - self.truth.v).dot(&(sat_pos - self.truth.r).normalize());
 
-            let (pr_meas, rr_meas) = if is_outlier {
+            let rr_meas = true_rr
+                + TIGHT_RANGE_RATE_SIGMA_MPS * self.standard_normal.sample(&mut self.gnss_rng);
+            let pr_meas = if is_outlier {
                 let cauchy = cauchy_with_scale(
                     TIGHT_PSEUDORANGE_OUTLIER_SCALE_M,
                     "tight pseudorange outlier scale",
                 );
-                (true_range + cauchy.sample(&mut self.rng), true_rr)
+                true_range + cauchy.sample(&mut self.gnss_rng)
             } else {
-                let pr_noise = 1.5 * self.standard_normal.sample(&mut self.rng);
-                let rr_noise =
-                    TIGHT_RANGE_RATE_SIGMA_MPS * self.standard_normal.sample(&mut self.rng);
-                (true_range + pr_noise, true_rr + rr_noise)
+                let pr_noise = 1.5 * self.standard_normal.sample(&mut self.gnss_rng);
+                true_range + pr_noise
             };
 
             sat_meas.push(GpsSatMeas {
@@ -251,26 +204,26 @@ impl SimRun {
         let mut pos_meas = self.truth.r;
         let mut vel_meas = self.truth.v;
         let is_pos_outlier =
-            allow_pos_outlier && self.rng.gen_range(0.0..1.0) < self.cfg.outlier_rate;
+            allow_pos_outlier && self.gnss_rng.gen_range(0.0..1.0) < self.cfg.outlier_rate;
         if is_pos_outlier {
             let cauchy = cauchy_with_scale(PVT_OUTLIER_SCALE_M, "PVT position outlier scale");
             pos_meas += Vector3::new(
-                cauchy.sample(&mut self.rng),
-                cauchy.sample(&mut self.rng),
-                cauchy.sample(&mut self.rng),
+                cauchy.sample(&mut self.gnss_rng),
+                cauchy.sample(&mut self.gnss_rng),
+                cauchy.sample(&mut self.gnss_rng),
             );
         } else {
             pos_meas += Vector3::new(
-                POS_SIGMA_M * self.standard_normal.sample(&mut self.rng),
-                POS_SIGMA_M * self.standard_normal.sample(&mut self.rng),
-                POS_SIGMA_M * self.standard_normal.sample(&mut self.rng),
-            );
-            vel_meas += Vector3::new(
-                vel_sigma_mps * self.standard_normal.sample(&mut self.rng),
-                vel_sigma_mps * self.standard_normal.sample(&mut self.rng),
-                vel_sigma_mps * self.standard_normal.sample(&mut self.rng),
+                POS_SIGMA_M * self.standard_normal.sample(&mut self.gnss_rng),
+                POS_SIGMA_M * self.standard_normal.sample(&mut self.gnss_rng),
+                POS_SIGMA_M * self.standard_normal.sample(&mut self.gnss_rng),
             );
         }
+        vel_meas += Vector3::new(
+            vel_sigma_mps * self.standard_normal.sample(&mut self.gnss_rng),
+            vel_sigma_mps * self.standard_normal.sample(&mut self.gnss_rng),
+            vel_sigma_mps * self.standard_normal.sample(&mut self.gnss_rng),
+        );
         let r_cov = pvt_covariance(vel_sigma_mps);
         GnssMeas {
             t: t_meas,
@@ -382,32 +335,22 @@ impl SimRun {
     }
 
     fn accumulate_nis(&mut self, t_meas: f64) {
-        let Some((t_nis, d2, dof)) = self.est.last_gnss_nis else {
-            return;
-        };
-        if dof == 0 || (t_nis - t_meas).abs() >= 1e-6 || !d2.is_finite() {
-            return;
-        }
+        let (_, d2, dof) = self
+            .est
+            .last_gnss_base_nis
+            .filter(|(t, _, _)| (*t - t_meas).abs() < 1e-6)
+            .unwrap_or((t_meas, f64::NAN, 0));
 
-        let (chi2_lo, chi2_hi) = if dof == 6 {
-            (CHI2_6_LO, CHI2_6_HI)
-        } else {
-            let nu = dof as f64;
-            let a = 1.0 - 2.0 / (9.0 * nu);
-            let b = (2.0 / (9.0 * nu)).sqrt();
-            let lo = nu * (a - Z_95 * b).max(0.0).powi(3);
-            let hi = nu * (a + Z_95 * b).powi(3);
-            (lo, hi)
-        };
+        let covered = crate::sim::innovation::in_interval(d2, dof);
         let ph = metrics::phase_id(t_meas, &self.cfg);
         self.nis_acc += d2;
         self.nis_ct += 1;
-        if d2 >= chi2_lo && d2 <= chi2_hi {
+        if covered {
             self.nis_hit += 1;
         }
         self.nis_phase_acc[ph] += d2;
         self.nis_phase_ct[ph] += 1;
-        if d2 >= chi2_lo && d2 <= chi2_hi {
+        if covered {
             self.nis_phase_hit[ph] += 1;
         }
     }

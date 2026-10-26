@@ -1,109 +1,100 @@
-# Verification Procedure
+# Reproducible verification
 
-This document defines the reproducible verification procedure for the current repository state. It is deliberately procedural. A validation claim is only meaningful if another reader can rerun the same commands, recover the same artifact set, and interpret the results against the same acceptance basis in `tasks.md`.
-
-## Scope
-
-Verification covers four layers. Unit and smoke tests confirm local invariants. Flight build checks confirm that the core library builds without diagnostics features. Monte Carlo campaigns evaluate the acceptance window and consistency metrics. Microbenchmark timing measures whether the current implementation remains comfortably below the per cycle compute budget. The report under `docs/report` should be rebuilt after the final benchmark run so that figures and narrative remain synchronized with the measured results.
-
-## Required Baseline Checks
-
-Run the default test suite first.
+Use `Cargo.lock` and Rust 1.90.0 or a compatible stable release.
+The authoritative task limits remain in [tasks.md](../tasks.md).
 
 ```bash
-cargo test
+cargo test --release --locked
+cargo test --release --locked --no-default-features --features flight
+cargo build --release --locked --bin harness --bin repro --bin resourcebench
+ASSESSMENT=deadline OUT_DIR=output_pvt RAYON_NUM_THREADS=4 target/release/harness 1000 --check
+ASSESSMENT=causal OUT_DIR=output_tight RAYON_NUM_THREADS=4 TIGHT=1 target/release/harness 1000 --check
+target/release/resourcebench
+target/release/resourcebench --tight
 ```
 
-Then confirm that the estimator also builds and tests in the lean flight configuration.
+`--check` returns a nonzero exit status when the selected statistical screen fails.
+`ASSESSMENT=causal` (default) selects instantaneous 400 Hz outputs;
+`ASSESSMENT=deadline` explicitly selects task §7's permitted retrospective result.
+Without `--check`, the harness writes results without enforcing the statistical screen.
+`SEED_OFFSET=100` starts a batch at seed 100. A single failure can be reproduced
+with `target/release/repro <seed>` and the same `TIGHT`/`SCENARIO` selection.
+The harness defaults to `SCENARIO=reference-entry`. `SCENARIO=legacy` retains the
+original ascending trajectory for diagnosis; it is not entry-validation evidence.
 
-```bash
-cargo test --no-default-features --features flight
-```
+## Statistical screen
 
-These two commands establish that the codebase is internally consistent before expensive campaign runs begin.
+Causal runs cover the complete 801-sample recovery grid at 400 Hz. The deadline
+assessment covers every 100 Hz checkpoint from 160 through 162 s (201 samples),
+using only data already received at 162 s. The full ten-second history remains
+available. Smoothing at 162 s does not mean those values were available at their
+historical timestamps; it also does not prove a bound between checkpoints.
+Numerical validity is sticky over the mission. All six norm-equivalent bounds,
+`3 sqrt(trace(P_block))`, must stay below their limits in every run. No component,
+including angular rate, is omitted.
 
-The diagnostics smoke regressions replay the full mission timeline, including the blackout interval and the recovery window. They are covered by the default test suite, but the release smoke target is the practical command when the goal is to validate the blackout specific regressions introduced in the current repository state.
+At each timestamp, the campaign also computes `3 sqrt(mean(||error||²))` across
+independent seeds, including any systematic error. The maximum of this empirical
+quantity across the window must meet each of the six limits. This is stronger
+than checking a time-averaged RMS or inspecting covariance alone.
 
-```bash
-cargo test --release --test smoke
-```
+Both assessments use the **joint 18-dimensional** covariance of position,
+velocity, left attitude error, angular rate, and both biases. All samples of the selected recovery grid
+are included, irrespective of GNSS acceptance. Its central 95% chi-square
+interval coverage must reach 90%; `mean(NEES)/18` must not exceed 1.30. Residual
+force and torque are auxiliary model states and are not included in this minimum
+navigation-state statistic.
 
-## Monte Carlo Campaign
+GNSS, star, and radar NIS are recorded **before** robustification/gating, including
+rejected observations, with exact precomputed central 95% chi-square intervals
+for degrees of freedom 1–64. Each sensor class must reach 90% coverage. Outlier
+samples remain in the denominator. The reference test requires at least 100
+unique seeds. These time samples are correlated; their count is not an effective
+number of independent trials and should not be used to invent a binomial
+confidence interval.
 
-The main acceptance evidence is produced by the benchmark harness. Running the harness without environment switches exercises the GNSS PVT path. Setting `TIGHT=1` enables the raw pseudorange and Doppler path. The default harness configuration uses a ten second fixed lag history horizon so that the validation path matches the task level memory and smoothing requirement.
+## Output interpretation
 
-```bash
-cargo run --release --bin harness -- 500
-TIGHT=1 cargo run --release --bin harness -- 500
-```
+- `campaign.txt`: causal joint statistical screen, empirical maxima, sensor coverages,
+  and marginal NEES diagnostics.
+- `recovery_ensemble.csv`: causal recovery timestamps and each state-block bound.
+- `deadline/{campaign.txt,recovery_ensemble.csv,per_run.csv}`: the separate
+  retrospective screen, 201-point ensemble curve, and each seed's covariance maxima.
+  Per-run files also export unrounded NEES sums/hits and all NIS counts/hits, so
+  untouched seed subsets can be audited without selection or rounding artifacts.
+- `per_run.csv`: the corresponding per-seed causal covariance screen.
+- `configuration.txt`: scenario, source revision, seed range, rates and stress
+  probabilities. Run from a clean checkout to associate results with that revision.
+- `mc_summary_{mode}.csv`: per-run maxima and older diagnostics. Its `passed`
+  column is only the six-block covariance screen.
+- `mc_trajectory_{mode}.csv`: truth altitude/Mach/domain coverage. Paired modes
+  use identical physical truth and IMU random streams.
+- Older RV-only NEES columns/plots retain their historical accepted-GNSS sampling
+  convention. They do not replace the joint recovery NEES in `campaign.txt`.
+- Smoothed RMS diagnostics are optional (`enable_smoothing_diagnostics` in the
+  library). They are `NaN` when not requested; that is not a successful smoothing
+  result. They are separate from the always-captured deadline checkpoint assessment.
 
-For regression work that must not overwrite the canonical benchmark directory, direct the outputs to dedicated folders.
+## Resources
 
-```bash
-OUT_DIR=output_20260311_pvt target/release/harness 100
-OUT_DIR=output_20260311_tight TIGHT=1 target/release/harness 100
-```
+`resourcebench` runs 2,000 single-thread 100 Hz cycles with four IMU propagations
+per cycle, GNSS updates, delayed stars/radar, a full reference aerodynamic table,
+and ten seconds of history. The allocator measures live/peak allocation payload,
+including nested raw-satellite buffers and replay workspaces. The result adds the
+worker's entire reserved 512 KiB stack and enforces **20,000,000 bytes**. It reports
+RTS time and checks that RTS performs no heap allocations. This excludes allocator
+bookkeeping, executable/shared-library pages, and unrelated application memory;
+the target integrator must account for their platform overhead.
 
-The first pair of commands is the full campaign. The second pair is the quick regression pattern used in the March 11, 2026 validation record.
-
-## Historical Record
-
-The repository carries a historical release record dated March 11, 2026. In the 500 run campaign used at that time, tight mode passes 500 of 500 runs. PVT mode passes 485 of 500 runs. In the additional 100 run regression on the same date, tight mode passes 100 of 100 runs and PVT mode passes 96 of 100 runs.
-
-Those numbers remain useful for comparison, but they predate the current acceptance alignment and summary schema. The harness now records recovery window RMS diagnostics, recovery window norm equivalent three sigma maxima, smoothed recovery window RMS diagnostics, and peak `Estimator::health()` history memory counters. A fresh full campaign is required before claiming a current validated record under the aligned acceptance logic.
-
-On the repository state dated June 13, 2026, a fresh 10 run release regression passes in both modes. Running
-
-```bash
-OUT_DIR=output_current_pvt target/release/harness 10
-OUT_DIR=output_current_tight TIGHT=1 target/release/harness 10
-```
-
-produces 10 of 10 passes in each mode. In that regression, PVT keeps `sigma3_vel_max_mps` between 0.415554 and 0.415679, with `sigma3_pos_max_m` near 9.8723 meters. Tight coupling keeps `sigma3_vel_max_mps` between 0.103921 and 0.104390, with `sigma3_pos_max_m` again near 9.8723 meters. These runs establish that the present code line clears the earlier PVT velocity acceptance miss and the earlier tight coupled forward filter divergence. They remain a quick regression rather than a replacement for the historical long campaign.
-
-## Single Seed Reproduction
-
-When a campaign identifies a failure or a suspicious tail case, reproduce the seed directly.
-
-```bash
-cargo run --release --bin repro -- 231
-TIGHT=1 cargo run --release --bin repro -- 231
-```
-
-If chronological diagnosis is required, enable tracing.
-
-```bash
-TRACE=1 cargo run --release --bin repro -- 206
-TRACE_GNSS=1 TIGHT=1 cargo run --release --bin repro -- 231
-```
-
-These traces are intended for targeted investigation. They should not be part of the routine acceptance workflow.
-
-When a summary metric must be localized in time, the blackout trace recorder and the release smoke regressions are the preferred path. They carry position error, velocity error, position three sigma, velocity three sigma, and RV NEES on a shared time grid, using the same norm equivalent three sigma convention that drives pass and fail in the summary csv.
-
-## Timing Check
-
-The timing envelope of the critical kernels can be sampled with the microbenchmark binary.
-
-```bash
-cargo run --release --bin microbench
-```
-
-This reports release build timings for `propagate`, `time_update_sqrt`, `update_gnss`, and `update_gps_raw`. The benchmark is a development machine measurement. Target processor certification still requires hardware specific validation. It remains useful for detecting regressions that would threaten the five millisecond single cycle budget.
-
-## Artifact Set
-
-A successful harness run writes a stable artifact family into the chosen output directory. The key files are `mc_summary_{pvt|tight}.csv`, `mc_nees_blocks_{pvt|tight}.csv`, `mc_nees_phase_{pvt|tight}.csv`, `mc_post_window_{pvt|tight}.csv`, and the generated `mc_*.svg` figures. The summary file captures per run pass and metric values, including recovery window three sigma maxima and peak history memory counters. The phase and block diagnostics localize consistency problems by mission segment and state group.
-
-## Report Rebuild
-
-After the final benchmark run, rebuild the technical report from the report directory.
-
-```bash
-cd docs/report
-xelatex main.tex
-```
-
-A second compilation pass may be needed if references or figure placements change. The report should only be considered current when its tables, figures, and narrative match the latest validated artifact set.
-
-Verification is complete only when the commands above succeed, the generated artifacts exist, and the resulting pass rates and consistency summaries are judged against the quantitative requirements in `tasks.md`.
+Wall-clock cycle p99 and maximum include host scheduling interference. Linux
+probes additionally report per-thread CPU p99/maximum and counts exceeding 5 ms.
+CPU time cannot replace the wall-clock deadline. `--check-time` makes a measured
+wall-clock cycle over 5 ms fail the probe; use it on the specified target. Full
+10-second RTS and the two-second recovery pass are timed separately; neither is
+hidden inside the causal cycle figure. They are synchronous and require their own
+target scheduling budget. The retrospective statistical analysis alone is not
+evidence that its batch computation fits a five-millisecond flight cycle.
+The five-millisecond requirement is specifically for ARM A78AE-class hardware:
+an x86 host measurement cannot certify it. Run the same probe and an integration
+trace on the target, including realistic scheduling and I/O, before claiming
+hardware compliance.

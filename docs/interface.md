@@ -23,7 +23,7 @@ The estimator is driven by a chronological IMU propagation loop. Each IMU sample
 ```rust
 let mut est = Estimator::new(noise, dyn_params, history_sec);
 
-est.set_precalibration(true, blackout_start);
+// Continuous random-walk bias estimation is the default.
 est.set_robust_tuning(gate_p, r_scale_cap, student_nu);
 
 for imu in imu_stream {
@@ -49,7 +49,7 @@ The supported primary calls are `update_gnss`, `update_star`, `update_radar`, an
 
 ## Tight Coupled Raw GNSS Contract
 
-The raw GNSS path is exposed through `update_gps_raw_ref(t, sats)`. Each satellite element shall provide ECEF position, ECEF velocity, pseudorange, pseudorange standard deviation, range rate, and range rate standard deviation. A typical call shape is shown below.
+The raw GNSS path is exposed through `update_gps_raw_ref(t, sats)`. Each satellite element shall provide position and velocity in the same inertial frame as the navigation state, clock-corrected pseudorange/range rate, and their standard deviations. The public fields retain the legacy names `pos_ecef` and `vel_ecef`; those names do not perform a coordinate transformation. Convert Earth-fixed ephemerides before submitting them to an inertial estimator. The reference simulator uses an idealized inertial constellation and does not model receiver clock states or atmospheric propagation corrections. A typical call shape is shown below.
 
 ```rust
 est.update_gps_raw_ref(t, &[
@@ -75,3 +75,35 @@ Some supervisory actions change state or covariance in ways that must survive hi
 `Estimator::health()` exposes the most useful operational counters. It reports the last GNSS NIS value and accept decision, the recent GNSS rejection streak, and the approximate history buffer usage in bytes. This interface serves runtime monitoring and does not alter the estimation state. The diagnostics harness records the peak history counters and memory estimate from this interface into its summary outputs.
 
 The integration rule is therefore simple. Propagate strictly in time, submit every measurement with its physical timestamp, and route any externally imposed covariance or bias intervention through a replay safe API. If those three conditions are met, the estimator can preserve both fixed lag smoothing and delayed measurement consistency without any special handling in the caller.
+
+## Noise Units and Angular-Rate Output
+
+`gyro_noise` and `accel_noise` are continuous white-noise densities defined by
+`Var(integrated noise over dt) = density^2 * dt`. They are not per-sample standard
+deviations. Bias random-walk fields likewise specify a variance rate.
+`State::omega` is a causal rate/torque-observer output, with nominal rigid-body
+feedforward and configurable `rate_observer_bandwidth` (rad/s; default 2).
+Its covariance includes rate memory, bias uncertainty and the shared gyro-noise
+correlation with attitude and torque. Attitude still integrates the gyro directly.
+See [design.md](design.md) for the observer equations and bandwidth convention.
+
+`last_gnss_nis` retains the robust diagnostic. `last_gnss_base_nis`,
+`last_star_base_nis`, and `last_radar_base_nis` expose pre-robustification NIS.
+Read diagnostics immediately after an update; delayed replay may replace later
+diagnostics. These values are monitoring outputs, not replay state.
+
+The reference batch disables constant-bias precalibration. Explicitly enabling
+that legacy path assumes a constant calibration bias and does not establish
+consistency for a random-walk bias. The old `RobustTuning::reacq_*_scale` fields
+remain source-compatible but no longer cause an artificial blackout-exit reset.
+
+## Streaming retrospective estimates
+
+`visit_smoothed(lag_sec, callback)` visits stored checkpoints newest first using
+only the observations already assimilated. The callback receives references to a
+state and covariance valid for that call. It allocates no history-sized workspace.
+On `None`, discard any partial callback results. `rts_smooth(lag_sec)` retains its
+single-oldest-state interface. These calls are synchronous: the target scheduler
+must budget their measured execution time separately from ordinary propagation.
+The deadline harness uses one two-second pass at simulation time 162 s; it does
+not insert this analysis pass into the flight-style 100 Hz resource cycle.

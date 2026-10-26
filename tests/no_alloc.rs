@@ -80,4 +80,12 @@ fn propagate_has_no_heap_allocations_after_warmup() {
         "allocations detected: before={} after={}",
         before, after
     );
+    let before_smooth = alloc_count();
+    let smoothed = est.rts_smooth(0.5);
+    let after_smooth = alloc_count();
+    assert!(smoothed.is_some());
+    assert_eq!(
+        before_smooth, after_smooth,
+        "RTS must use bounded stack workspace"
+    );
 }

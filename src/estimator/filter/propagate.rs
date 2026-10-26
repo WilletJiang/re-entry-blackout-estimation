@@ -22,7 +22,13 @@ impl Estimator {
         let omega_meas = imu.gyro_meas - bg;
         let accel_meas = imu.accel_meas - ba;
 
-        self.state.omega = omega_meas;
+        let (rate_gain, torque_gain) = self.rate_observer_gains(dt);
+        let angular_acceleration = self.nominal_angular_acceleration(imu.force_cmd, imu.torque_cmd);
+        let rate_innovation = omega_meas - self.state.omega - angular_acceleration * (0.5 * dt);
+        self.state.omega += angular_acceleration * dt + rate_gain * rate_innovation;
+        self.state.aero_res_torque = self.state.aero_res_torque
+            * (-dt / self.dyn_params.tau_aero_torque).exp()
+            + self.dyn_params.inertia * (torque_gain * rate_innovation);
 
         let dq = UnitQuaternion::from_scaled_axis(omega_meas * dt);
         self.state.q = UnitQuaternion::new_normalize((self.state.q * dq).into_inner());
@@ -59,9 +65,7 @@ impl Estimator {
         self.state.v = v_prev + specific_force_nav * dt;
 
         let phi_f = (-dt / self.dyn_params.tau_aero_force).exp();
-        let phi_t = (-dt / self.dyn_params.tau_aero_torque).exp();
         self.state.aero_res_force *= phi_f;
-        self.state.aero_res_torque *= phi_t;
         self.state.t = imu.t;
 
         let (phi, qk) = self.linearize(dt, linearize_specific_force_b);
@@ -92,25 +96,50 @@ impl Estimator {
         let dr_datt = -skew(a_nav) * half_dt2;
         insert_block(&mut phi, &dr_datt, 0, 6);
         insert_block(&mut phi, &(-c * half_dt2), 0, 15);
-        let dr_daf = (c / self.dyn_params.mass) * half_dt2;
-        insert_block(&mut phi, &dr_daf, 0, 18);
 
         let dv_datt = -skew(a_nav) * dt;
         insert_block(&mut phi, &dv_datt, 3, 6);
         insert_block(&mut phi, &(-c * dt), 3, 15);
-        let dv_daf = (c / self.dyn_params.mass) * dt;
-        insert_block(&mut phi, &dv_daf, 3, 18);
 
-        for i in 0..3 {
-            phi[(i + 6, i + 12)] = -dt;
-        }
-        let omega_x = -skew(self.state.omega) * dt;
-        insert_block(&mut phi, &(Matrix3::identity() + omega_x), 6, 6);
+        // Attitude errors and corrections are left-multiplicative (inertial).
+        // Strapdown translation already measures residual forces through the IMU.
+        insert_block(&mut phi, &(-c * dt), 6, 12);
+        let (rate_gain, torque_gain) = self.rate_observer_gains(dt);
+        let inertia = self.dyn_params.inertia;
+        let inertia_inv = inertia.try_inverse().expect("inertia must be invertible");
+        let rate_jacobian =
+            inertia_inv * (skew(inertia * self.state.omega) - skew(self.state.omega) * inertia);
+        insert_block(
+            &mut phi,
+            &(Matrix3::identity() * (1.0 - rate_gain)
+                + rate_jacobian * (dt * (1.0 - 0.5 * rate_gain))),
+            9,
+            9,
+        );
+        insert_block(&mut phi, &(-Matrix3::identity() * rate_gain), 9, 12);
+        insert_block(
+            &mut phi,
+            &(inertia_inv * (dt * (1.0 - 0.5 * rate_gain))),
+            9,
+            21,
+        );
+        insert_block(
+            &mut phi,
+            &(-inertia * torque_gain * (Matrix3::identity() + rate_jacobian * (0.5 * dt))),
+            21,
+            9,
+        );
+        insert_block(&mut phi, &(-inertia * torque_gain), 21, 12);
 
         let phi_f = (-dt / self.dyn_params.tau_aero_force).exp();
         let phi_t = (-dt / self.dyn_params.tau_aero_torque).exp();
         insert_block(&mut phi, &(Matrix3::identity() * phi_f), 18, 18);
-        insert_block(&mut phi, &(Matrix3::identity() * phi_t), 21, 21);
+        insert_block(
+            &mut phi,
+            &(Matrix3::identity() * (phi_t - 0.5 * torque_gain * dt)),
+            21,
+            21,
+        );
         let qk = self.process_noise(dt);
         (phi, qk)
     }
@@ -147,6 +176,45 @@ impl Estimator {
     #[cfg(feature = "diagnostics")]
     pub fn bench_time_update_sqrt(&mut self, phi: &MatN, qk: &MatN) {
         self.time_update_sqrt(phi, qk);
+    }
+
+    pub(super) fn rate_observer_gains(&self, dt: f64) -> (f64, f64) {
+        let bandwidth = self.noise.rate_observer_bandwidth;
+        (2.0_f64.sqrt() * bandwidth * dt, bandwidth * bandwidth * dt)
+    }
+
+    fn nominal_angular_acceleration(
+        &self,
+        force_cmd: Vector3<f64>,
+        torque_cmd: Vector3<f64>,
+    ) -> Vector3<f64> {
+        let torque = match &self.aero_table {
+            Some(table) => {
+                nominal_body_dynamics_with_residual(
+                    table,
+                    &self.dyn_params,
+                    self.state.r,
+                    self.state.v,
+                    &self.state.q,
+                    self.state.omega,
+                    force_cmd,
+                    torque_cmd,
+                    self.state.aero_res_force,
+                    self.state.aero_res_torque,
+                )
+                .total_torque_b
+            }
+            None => torque_cmd + self.state.aero_res_torque,
+        };
+        self.dyn_params
+            .inertia
+            .try_inverse()
+            .expect("inertia must be invertible")
+            * (torque
+                - self
+                    .state
+                    .omega
+                    .cross(&(self.dyn_params.inertia * self.state.omega)))
     }
 
     fn nominal_specific_force_b(

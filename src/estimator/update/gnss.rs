@@ -94,18 +94,25 @@ impl Estimator {
         let s_chol = match Cholesky::new(s) {
             Some(c) => c,
             None => {
+                if record {
+                    self.history.push_event(Event::Gnss(meas));
+                }
                 self.replay_tail(replay_events);
                 return;
             }
         };
         let s_inv = s_chol.inverse();
         let base_d2 = (innov.transpose() * s_inv * innov)[(0, 0)];
+        self.last_gnss_base_nis = Some((meas.t, base_d2, 6));
         let r_cov = self.robust_scale(ROBUST_SENSOR_GNSS_PVT, 6, base_d2, meas.r_cov);
 
         let s = h * p_prior * h.transpose() + r_cov;
         let s_chol = match Cholesky::new(s) {
             Some(c) => c,
             None => {
+                if record {
+                    self.history.push_event(Event::Gnss(meas));
+                }
                 self.replay_tail(replay_events);
                 return;
             }
@@ -122,9 +129,32 @@ impl Estimator {
         self.last_gnss_accepted = Some((meas.t, accepted));
         if !accepted {
             self.gnss_reject_streak = self.gnss_reject_streak.saturating_add(1);
-            if self.gnss_reject_streak >= 3 {
-                self.inflate_rv(1_000.0, 100.0);
+            // A bad position fix need not discard a valid velocity observation.
+            // The full packet's original NIS remains in the diagnostics.
+            let velocity_used = if !self.bias_cal.enabled && self.noise.gps_ba_update_gain == 1.0 {
+                let mut velocity_h = MeasMat::<3>::zeros();
+                for i in 0..3 {
+                    velocity_h[(i, i + 3)] = 1.0;
+                }
+                self.measurement_update(
+                    ROBUST_SENSOR_GNSS_PVT,
+                    innov.fixed_rows::<3>(3).into_owned(),
+                    velocity_h,
+                    meas.r_cov.fixed_view::<3, 3>(3, 3).into_owned(),
+                    3,
+                )
+            } else {
+                false
+            };
+            self.last_gnss_accepted = Some((meas.t, velocity_used));
+            if self.gnss_reject_streak >= 8 {
+                self.inflate_rv(1_000.0, if velocity_used { 1.0 } else { 100.0 });
                 self.gnss_reject_streak = 0;
+            }
+            self.record_gnss_posterior(meas.t);
+            self.maybe_checkpoint_with_prediction(true, predicted_end_state);
+            if record {
+                self.history.push_event(Event::Gnss(meas));
             }
             self.replay_tail(replay_events);
             return;
@@ -150,11 +180,7 @@ impl Estimator {
             self.trace_gnss_post(meas.t);
         }
 
-        let p_post = self.cov();
-        self.last_gnss_post_t = Some(meas.t);
-        self.last_gnss_post_rv_p = Some(p_post.fixed_view::<6, 6>(0, 0).into_owned());
-        self.last_gnss_post_r = Some(self.state.r);
-        self.last_gnss_post_v = Some(self.state.v);
+        self.record_gnss_posterior(meas.t);
 
         self.update_aero_learning(meas.vel, meas.t);
 
@@ -166,7 +192,17 @@ impl Estimator {
         self.replay_tail(replay_events);
     }
 
+    pub(super) fn record_gnss_posterior(&mut self, t: f64) {
+        self.last_gnss_post_t = Some(t);
+        self.last_gnss_post_rv_p = Some(self.cov().fixed_view::<6, 6>(0, 0).into_owned());
+        self.last_gnss_post_r = Some(self.state.r);
+        self.last_gnss_post_v = Some(self.state.v);
+    }
+
     fn apply_gnss_active_set(&self, t: f64, innov: &SVector<f64, 6>, k: &mut Gain6) {
+        if !self.bias_cal.enabled && self.noise.gps_ba_update_gain == 1.0 {
+            return;
+        }
         let (mut bias_updates_enabled, max_ba_update) = self.bias_update_profile(t);
         if self.bias_cal.enabled {
             bias_updates_enabled = false;
